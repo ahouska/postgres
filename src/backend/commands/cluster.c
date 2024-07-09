@@ -21,6 +21,7 @@
 #include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relscan.h"
+#include "access/rewriteheap.h"
 #include "access/tableam.h"
 #include "access/toast_internals.h"
 #include "access/transam.h"
@@ -179,17 +180,21 @@ static LogicalDecodingContext *setup_logical_decoding(Oid relid,
 static HeapTuple get_changed_tuple(ConcurrentChange *change);
 static void apply_concurrent_changes(ClusterDecodingState *dstate,
 									 Relation rel, ScanKey key, int nkeys,
-									 IndexInsertState *iistate);
+									 IndexInsertState *iistate,
+									 RewriteState rwstate);
 static void apply_concurrent_insert(Relation rel, ConcurrentChange *change,
 									HeapTuple tup, IndexInsertState *iistate,
-									TupleTableSlot *index_slot);
+									TupleTableSlot *index_slot,
+									RewriteState rwstate);
 static void apply_concurrent_update(Relation rel, HeapTuple tup,
 									HeapTuple tup_target,
 									ConcurrentChange *change,
 									IndexInsertState *iistate,
-									TupleTableSlot *index_slot);
+									TupleTableSlot *index_slot,
+									RewriteState rwstate);
 static void apply_concurrent_delete(Relation rel, HeapTuple tup_target,
-									ConcurrentChange *change);
+									ConcurrentChange *change,
+									RewriteState rwstate);
 static HeapTuple find_target_tuple(Relation rel, ScanKey key, int nkeys,
 								   HeapTuple tup_key,
 								   Snapshot snapshot,
@@ -202,7 +207,8 @@ static void process_concurrent_changes(LogicalDecodingContext *ctx,
 									   Relation rel_src,
 									   ScanKey ident_key,
 									   int ident_key_nentries,
-									   IndexInsertState *iistate);
+									   IndexInsertState *iistate,
+									   RewriteState rwstate);
 static IndexInsertState *get_index_insert_state(Relation relation,
 												Oid ident_index_id);
 static ScanKey build_identity_key(Oid ident_idx_oid, Relation rel_src,
@@ -3073,7 +3079,8 @@ cluster_decode_concurrent_changes(LogicalDecodingContext *ctx,
  */
 static void
 apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
-						 ScanKey key, int nkeys, IndexInsertState *iistate)
+						 ScanKey key, int nkeys, IndexInsertState *iistate,
+						 RewriteState rwstate)
 {
 	TupleTableSlot *index_slot, *ident_slot;
 	HeapTuple	tup_old = NULL;
@@ -3144,7 +3151,8 @@ apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
 		{
 			Assert(tup_old == NULL);
 
-			apply_concurrent_insert(rel, change, tup, iistate, index_slot);
+			apply_concurrent_insert(rel, change, tup, iistate, index_slot,
+									rwstate);
 
 			pfree(tup);
 		}
@@ -3152,7 +3160,7 @@ apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
 				 change->kind == CHANGE_DELETE)
 		{
 			IndexScanDesc	ind_scan = NULL;
-			HeapTuple	tup_key;
+			HeapTuple	tup_key, tup_exist_cp;
 
 			if (change->kind == CHANGE_UPDATE_NEW)
 			{
@@ -3193,11 +3201,23 @@ apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
 			if (tup_exist == NULL)
 				elog(ERROR, "Failed to find target tuple");
 
+			/*
+			 * Update the mapping for xmax of the old version.
+			 *
+			 * Use a copy ('tup_exist' can point to shared buffer) with xmin
+			 * invalid because mapping of that should have been written on
+			 * insertion.
+			 */
+			tup_exist_cp = heap_copytuple(tup_exist);
+			HeapTupleHeaderSetXmin(tup_exist_cp->t_data, InvalidTransactionId);
+			logical_rewrite_heap_tuple(rwstate, change->old_tid, tup_exist_cp);
+			pfree(tup_exist_cp);
+
 			if (change->kind == CHANGE_UPDATE_NEW)
 				apply_concurrent_update(rel, tup, tup_exist, change, iistate,
-										index_slot);
+										index_slot, rwstate);
 			else
-				apply_concurrent_delete(rel, tup_exist, change);
+				apply_concurrent_delete(rel, tup_exist, change, rwstate);
 
 			ResetClusterCurrentXids();
 
@@ -3238,9 +3258,12 @@ apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
 
 static void
 apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
-						IndexInsertState *iistate, TupleTableSlot *index_slot)
+						IndexInsertState *iistate, TupleTableSlot *index_slot,
+						RewriteState rwstate)
 {
+	HeapTupleHeader	tup_hdr = tup->t_data;
 	Snapshot	snapshot = change->snapshot;
+	ItemPointerData		old_tid;
 	List	   *recheck;
 
 	/*
@@ -3249,6 +3272,9 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 	 * anyway.
 	 */
 	SetClusterCurrentXids(snapshot->subxip, snapshot->subxcnt);
+
+	/* Remember location in the old heap. */
+	ItemPointerCopy(&tup_hdr->t_ctid, &old_tid);
 
 	/*
 	 * Write the tuple into the new heap.
@@ -3264,6 +3290,14 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 
 	heap_insert(rel, tup, change->xid, snapshot->curcid - 1,
 				HEAP_INSERT_NO_LOGICAL, NULL);
+
+	/*
+	 * Update the mapping for xmin. (xmax should be invalid). This is needed
+	 * because, during the processing, the table is considered an "user
+	 * catalog".
+	 */
+	Assert(!TransactionIdIsValid(HeapTupleHeaderGetRawXmax(tup->t_data)));
+	logical_rewrite_heap_tuple(rwstate, old_tid, tup);
 
 	/*
 	 * Update indexes.
@@ -3298,15 +3332,18 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 static void
 apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 						ConcurrentChange *change, IndexInsertState *iistate,
-						TupleTableSlot *index_slot)
+						TupleTableSlot *index_slot, RewriteState rwstate)
 {
 	List	   *recheck;
 	LockTupleMode	lockmode;
 	TU_UpdateIndexes	update_indexes;
-	ItemPointerData		tid_old_new_heap;
+	ItemPointerData		tid_new_old_heap, tid_old_new_heap;
 	TM_Result	res;
 	Snapshot snapshot	= change->snapshot;
 	TM_FailureData tmfd;
+
+	/* Location of the new tuple in the old heap. */
+	ItemPointerCopy(&tup->t_data->t_ctid, &tid_new_old_heap);
 
 	/* Location of the existing tuple in the new heap. */
 	ItemPointerCopy(&tup_target->t_self, &tid_old_new_heap);
@@ -3329,6 +3366,10 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 					  false);
 	if (res != TM_Ok)
 		ereport(ERROR, (errmsg("failed to apply concurrent UPDATE")));
+
+	/* Update the mapping for xmin of the new version. */
+	Assert(!TransactionIdIsValid(HeapTupleHeaderGetRawXmax(tup->t_data)));
+	logical_rewrite_heap_tuple(rwstate, tid_new_old_heap, tup);
 
 	ExecStoreHeapTuple(tup, index_slot, false);
 
@@ -3353,7 +3394,7 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 
 static void
 apply_concurrent_delete(Relation rel, HeapTuple tup_target,
-						ConcurrentChange *change)
+						ConcurrentChange *change, RewriteState rwstate)
 {
 	ItemPointerData		tid_old_new_heap;
 	TM_Result	res;
@@ -3444,7 +3485,8 @@ find_target_tuple(Relation rel, ScanKey key, int nkeys, HeapTuple tup_key,
 static void
 process_concurrent_changes(LogicalDecodingContext *ctx, XLogRecPtr end_of_wal,
 						   Relation rel_dst, Relation rel_src, ScanKey ident_key,
-						   int ident_key_nentries, IndexInsertState *iistate)
+						   int ident_key_nentries, IndexInsertState *iistate,
+						   RewriteState rwstate)
 {
 	ClusterDecodingState *dstate;
 
@@ -3468,7 +3510,7 @@ process_concurrent_changes(LogicalDecodingContext *ctx, XLogRecPtr end_of_wal,
 			rel_dst->rd_toastoid = rel_src->rd_rel->reltoastrelid;
 
 		apply_concurrent_changes(dstate, rel_dst, ident_key,
-								 ident_key_nentries, iistate);
+								 ident_key_nentries, iistate, rwstate);
 	}
 	PG_FINALLY();
 	{
@@ -3631,6 +3673,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	bool		is_system_catalog;
 	Oid		ident_idx_old, ident_idx_new;
 	IndexInsertState *iistate;
+	RewriteState	rwstate;
 	ScanKey		ident_key;
 	int		ident_key_nentries;
 	XLogRecPtr	wal_insert_ptr, end_of_wal;
@@ -3708,10 +3751,26 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * Apply concurrent changes first time, to minimize the time we need to
 	 * hold AccessExclusiveLock. (Quite some amount of WAL could have been
 	 * written during the data copying and index creation.)
+	 *
+	 * Now we are processing individual tuples, so pass false for
+	 * 'tid_chains'. Since rwstate is now only needed for
+	 * logical_begin_heap_rewrite(), none of the transaction IDs needs to be
+	 * valid.
 	 */
+	rwstate = begin_heap_rewrite(OldHeap, NewHeap,
+								 InvalidTransactionId,
+								 InvalidTransactionId,
+								 InvalidTransactionId,
+								 false);
 	process_concurrent_changes(ctx, end_of_wal, NewHeap,
 							   swap_toast_by_content ? OldHeap : NULL,
-							   ident_key, ident_key_nentries, iistate);
+							   ident_key, ident_key_nentries, iistate,
+							   rwstate);
+	/*
+	 * OldHeap will be closed, so we need to initialize rwstate again for the
+	 * next call of process_concurrent_changes().
+	 */
+	end_heap_rewrite(rwstate);
 
 	/*
 	 * Release the locks that allowed concurrent data changes, in order to
@@ -3833,9 +3892,16 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	end_of_wal = GetFlushRecPtr(NULL);
 
 	/* Apply the concurrent changes again. */
+	rwstate = begin_heap_rewrite(OldHeap, NewHeap,
+								 InvalidTransactionId,
+								 InvalidTransactionId,
+								 InvalidTransactionId,
+								 false);
 	process_concurrent_changes(ctx, end_of_wal, NewHeap,
 							   swap_toast_by_content ? OldHeap : NULL,
-							   ident_key, ident_key_nentries, iistate);
+							   ident_key, ident_key_nentries, iistate,
+							   rwstate);
+	end_heap_rewrite(rwstate);
 
 	/* Remember info about rel before closing OldHeap */
 	relpersistence = OldHeap->rd_rel->relpersistence;
