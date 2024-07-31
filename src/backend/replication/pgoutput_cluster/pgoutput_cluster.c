@@ -135,7 +135,8 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	{
 		/* CID should not go backwards. */
 		Assert(dstate->snapshot == NULL ||
-			   snapshot->curcid >= dstate->snapshot->curcid);
+			   snapshot->curcid >= dstate->snapshot->curcid ||
+			   change->txn->xid != dstate->last_change_xid);
 
 		/*
 		 * XXX Is it a problem that the copy is created in
@@ -324,6 +325,9 @@ store:
 	isnull[0] = false;
 	tuplestore_putvalues(dstate->tstore, dstate->tupdesc_change,
 						 values, isnull);
+#ifdef USE_ASSERT_CHECKING
+	dstate->last_change_xid = xid;
+#endif
 
 	/* Accounting. */
 	dstate->nchanges++;

@@ -107,6 +107,8 @@ typedef struct ClusterDecodingState
 	 * tuplestore does this transparently.
 	 */
 	Tuplestorestate *tstore;
+	/* XID of the last change added to tstore. */
+	TransactionId	last_change_xid	PG_USED_FOR_ASSERTS_ONLY;
 
 	/* The current number of changes in tstore. */
 	double		nchanges;
