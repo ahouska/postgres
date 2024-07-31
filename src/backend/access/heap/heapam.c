@@ -2082,7 +2082,7 @@ heap_insert(Relation relation, HeapTuple tup, TransactionId xid,
 		 * If this is a catalog, we need to transmit combo CIDs to properly
 		 * decode, so log that as well.
 		 *
-		 * Currently we only pass HEAP_INSERT_NO_LOGICAL when doing VACUUM
+		 * Currently we only receive HEAP_INSERT_NO_LOGICAL when doing VACUUM
 		 * FULL / CLUSTER, in which case the visibility information does not
 		 * change. Therefore, there's no need to update the decoding snapshot.
 		 */

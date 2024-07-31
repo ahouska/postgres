@@ -654,6 +654,10 @@ SnapBuildInitialSnapshotForCluster(SnapBuild *builder)
 /*
  * Turn a historic MVCC snapshot into an ordinary MVCC snapshot.
  *
+ * Unlike a regular (non-historic) MVCC snapshot, the xip array of this
+ * snapshot contains not only running main transactions, but also their
+ * subtransactions. This difference does has no impact on XidInMVCCSnapshot().
+ *
  * Pass true for 'in_place' if you don't care about modifying the source
  * snapshot. If you need a new instance, and one that was allocated as a
  * single chunk of memory, pass false.

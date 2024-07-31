@@ -140,6 +140,12 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 		/*
 		 * XXX Is it a problem that the copy is created in
 		 * TopTransactionContext?
+		 *
+		 * XXX Wouldn't it be o.k. for SnapBuildMVCCFromHistoric() to set xcnt
+		 * to 0 instead of converting xip in this case? The point is that
+		 * transactions which are still in progress from the perspective of
+		 * reorderbuffer.c could not be replayed yet, so we do not need to
+		 * examine their XIDs.
 		 */
 		dstate->snapshot = SnapBuildMVCCFromHistoric(snapshot, false);
 		dstate->snapshot_lsn = snapshot->lsn;

@@ -3191,8 +3191,9 @@ apply_concurrent_changes(ClusterDecodingState *dstate, Relation rel,
 			 * Note that this snapshot was created from a historic snapshot
 			 * using SnapBuildMVCCFromHistoric(), which does not touch
 			 * 'subxip'. Thus, unlike in a regular MVCC snapshot, the array
-			 * does not contain (sub)transactions other than the one whose
-			 * data changes we are applying.
+			 * only contains the transactions whose data changes we are
+			 * applying, and its subtransactions. That's exactly what we need
+			 * to check if particular xact is a "current transaction:".
 			 */
 			SetClusterCurrentXids(snapshot->subxip, snapshot->subxcnt);
 
