@@ -483,8 +483,9 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 			rec = (xl_heap_insert *) XLogRecGetData(buf->record);
 			/*
-			 * (This does happen when raw_heap_insert marks the TOAST record
-			 * as HEAP_INSERT_NO_LOGICAL).
+			 * (Besides insertion into the main heap by CLUSTER CONCURRENTLY,
+			 * this does happen when raw_heap_insert marks the TOAST record as
+			 * HEAP_INSERT_NO_LOGICAL).
 			 */
 			if ((rec->flags & XLH_INSERT_CONTAINS_NEW_TUPLE) == 0)
 				return;
