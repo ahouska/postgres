@@ -120,9 +120,10 @@ typedef struct IndexInsertState
  * then the tuples we try to insert into the new storage are not guaranteed to
  * fit into the storage.
  *
- * Another problem is that multiple backends might call cluster_rel(). This is
- * not necessarily a correctness issue, but it definitely means wasted CPU
- * time.
+ * Another problem is relfilenode changed by another backend. It's not
+ * necessarily a correctness issue (e.g. when the other backend ran
+ * cluster_rel()), but it's safer for us to terminate the table processing in
+ * such cases.
  *
  * Where possible, commands which might change the relation in an incompatible
  * way should check if CLUSTER CONCURRENTLY is running, before they start to
@@ -148,6 +149,10 @@ typedef struct CatalogState
 
 	/* rd_replidindex */
 	Oid		replidindex;
+
+	/* rd_locator of the relation and its TOAST relation. */
+	RelFileLocator locator;
+	RelFileLocator locator_toast;
 } CatalogState;
 
 /* The WAL segment being decoded. */
@@ -2543,7 +2548,7 @@ end_concurrent_cluster(Oid relid, bool error)
 	LWLockAcquire(ClusteredRelsLock, LW_EXCLUSIVE);
 	entry = hash_search(ClusteredRelsHash, &key, HASH_REMOVE, NULL);
 
-	/* Disable end_concurrent_cluster_on_exit_callback(). */
+	/* Disable cluster_before_shmem_exit_callback(). */
 	if (OidIsValid(clustered_rel))
 		clustered_rel = InvalidOid;
 
@@ -2754,6 +2759,16 @@ get_catalog_state(Relation rel)
 	result->replident = replident;
 	result->replidindex = ident_idx;
 
+	memcpy(&result->locator, &rel->rd_locator, sizeof(RelFileLocator));
+	if (OidIsValid(reltoastrelid))
+	{
+		Relation	toastrel;
+
+		toastrel = table_open(reltoastrelid, AccessShareLock);
+		memcpy(&result->locator_toast, &toastrel->rd_locator,
+			   sizeof(RelFileLocator));
+		table_close(toastrel, AccessShareLock);
+	}
 	return	result;
 }
 
@@ -2797,6 +2812,7 @@ free_catalog_state(CatalogState *state)
 static void
 check_catalog_changes(Relation rel, CatalogState *cat_state)
 {
+	Oid		reltoastrelid = rel->rd_rel->reltoastrelid;
 	List	*ind_oids;
 	ListCell	*lc;
 	LOCKMODE	lmode;
@@ -2806,10 +2822,32 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 	/* First, check the relation info. */
 
 	/* TOAST is not easy to change, but check. */
-	if (rel->rd_rel->reltoastrelid != cat_state->reltoastrelid)
+	if (reltoastrelid != cat_state->reltoastrelid)
 		ereport(ERROR,
 				errmsg("TOAST relation of relation \"%s\" changed by another transaction",
 					   RelationGetRelationName(rel)));
+
+	/*
+	 * Likewise, check_for_concurrent_cluster() should prevent others from
+	 * changing the relation file concurrently, but it's our responsibility to
+	 * avoid data loss.
+	 */
+	if (!RelFileLocatorEquals(rel->rd_locator, cat_state->locator))
+		ereport(ERROR,
+				(errmsg("file of relation \"%s\" changed by another transaction",
+						RelationGetRelationName(rel))));
+	if (OidIsValid(reltoastrelid))
+	{
+		Relation	toastrel;
+
+		toastrel = table_open(reltoastrelid, AccessShareLock);
+		if (!RelFileLocatorEquals(toastrel->rd_locator,
+								  cat_state->locator_toast))
+			ereport(ERROR,
+					(errmsg("file of relation \"%s\" changed by another transaction",
+							RelationGetRelationName(toastrel))));
+		table_close(toastrel, AccessShareLock);
+	}
 
 	if (rel->rd_rel->relpersistence != cat_state->relpersistence)
 		ereport(ERROR,
