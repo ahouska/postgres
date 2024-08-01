@@ -41,6 +41,9 @@ typedef struct ClusterParams
  * The following definitions are used for concurrent processing.
  */
 
+extern RelFileLocator	clustered_rel_locator;
+extern RelFileLocator	clustered_rel_toast_locator;
+
 /*
  * Lock level for the concurrent variant of CLUSTER / VACUUM FULL.
  *

@@ -33,6 +33,7 @@
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
 #include "catalog/pg_control.h"
+#include "commands/cluster.h"
 #include "replication/decode.h"
 #include "replication/logical.h"
 #include "replication/message.h"
@@ -474,6 +475,40 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	 * the original XID when doing changes in the new storage. The decoding
 	 * subsystem probably does not expect to see the same transaction multiple
 	 * times.
+	 */
+
+	/*
+	 * First, check if CLUSTER CONCURRENTLY is in progress. If so, only decode
+	 * data changes of the table that it is processing, and of its TOAST
+	 * relation.
+	 *
+	 * (TOAST locator should not be set unless the main is.)
+	 */
+	Assert(!OidIsValid(clustered_rel_toast_locator.relNumber) ||
+		   OidIsValid(clustered_rel_locator.relNumber));
+
+	if (OidIsValid(clustered_rel_locator.relNumber))
+	{
+		XLogReaderState *r = buf->record;
+		RelFileLocator locator;
+
+		XLogRecGetBlockTag(r, 0, &locator, NULL, NULL);
+
+		if (!RelFileLocatorEquals(locator, clustered_rel_locator) &&
+			(!OidIsValid(clustered_rel_toast_locator.relNumber) ||
+			 !RelFileLocatorEquals(locator, clustered_rel_toast_locator)))
+			return;
+	}
+
+	/*
+	 * Second, skip records which do not contain sufficient information for
+	 * the decoding.
+	 *
+	 * The backend executing CLUSTER CONCURRENTLY should not return here
+	 * because the records which passed the checks above should contain be
+	 * eligible for decoding. However, CLUSTER CONCURRENTLY generates WAL when
+	 * writing data into the new table, which should not be decoded by the
+	 * other backends. This is where the other backends skip them.
 	 */
 	switch (info)
 	{

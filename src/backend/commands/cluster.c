@@ -93,6 +93,13 @@ static Oid	clustered_rel	= InvalidOid;
 /* The same for its TOAST relation. */
 static Oid	clustered_rel_toast	= InvalidOid;
 
+/*
+ * The locators are used to avoid logical decoding of data that we do not need
+ * for our table.
+ */
+RelFileLocator	clustered_rel_locator = {.relNumber = InvalidOid};
+RelFileLocator	clustered_rel_toast_locator = {.relNumber = InvalidOid};
+
 /* XXX Do we also need to mention VACUUM FULL CONCURRENTLY? */
 #define CLUSTER_IN_PROGRESS_MESSAGE \
 	"relation \"%s\" is already being processed by CLUSTER CONCURRENTLY"
@@ -123,7 +130,9 @@ typedef struct IndexInsertState
  * Another problem is relfilenode changed by another backend. It's not
  * necessarily a correctness issue (e.g. when the other backend ran
  * cluster_rel()), but it's safer for us to terminate the table processing in
- * such cases.
+ * such cases. However, this information is also needs to be checked during
+ * logical decoding, so we store it in global variables clustered_rel_locator
+ * and clustered_rel_toast_locator above.
  *
  * Where possible, commands which might change the relation in an incompatible
  * way should check if CLUSTER CONCURRENTLY is running, before they start to
@@ -149,10 +158,6 @@ typedef struct CatalogState
 
 	/* rd_replidindex */
 	Oid		replidindex;
-
-	/* rd_locator of the relation and its TOAST relation. */
-	RelFileLocator locator;
-	RelFileLocator locator_toast;
 } CatalogState;
 
 /* The WAL segment being decoded. */
@@ -2528,6 +2533,18 @@ begin_concurrent_cluster(Relation *rel_p, Relation *index_p,
 							 ShareLock, LOCK_CLUSTER_CONCURRENT);
 	unlock_and_close_relations(rri, nrel);
 	reopen_relations(rri, nrel);
+
+	/* Avoid logical decoding of other relations. */
+	clustered_rel_locator = rel->rd_locator;
+	if (OidIsValid(toastrelid))
+	{
+		Relation	toastrel;
+
+		/* Avoid logical decoding of other TOAST relations. */
+		toastrel = table_open(toastrelid, AccessShareLock);
+		clustered_rel_toast_locator = toastrel->rd_locator;
+		table_close(toastrel, AccessShareLock);
+	}
 }
 
 /*
@@ -2564,6 +2581,10 @@ end_concurrent_cluster(Oid relid, bool error)
 	else
 		key.relid = InvalidOid;
 	LWLockRelease(ClusteredRelsLock);
+
+	/* Restore normal function of logical decoding. */
+	clustered_rel_locator.relNumber = InvalidOid;
+	clustered_rel_toast_locator.relNumber = InvalidOid;
 
 	/*
 	 * On normal completion (!error), we should not really fail to remove the
@@ -2759,16 +2780,6 @@ get_catalog_state(Relation rel)
 	result->replident = replident;
 	result->replidindex = ident_idx;
 
-	memcpy(&result->locator, &rel->rd_locator, sizeof(RelFileLocator));
-	if (OidIsValid(reltoastrelid))
-	{
-		Relation	toastrel;
-
-		toastrel = table_open(reltoastrelid, AccessShareLock);
-		memcpy(&result->locator_toast, &toastrel->rd_locator,
-			   sizeof(RelFileLocator));
-		table_close(toastrel, AccessShareLock);
-	}
 	return	result;
 }
 
@@ -2830,9 +2841,10 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 	/*
 	 * Likewise, check_for_concurrent_cluster() should prevent others from
 	 * changing the relation file concurrently, but it's our responsibility to
-	 * avoid data loss.
+	 * avoid data loss. (The original locators are stored outside cat_state,
+	 * but the check belongs to this function.)
 	 */
-	if (!RelFileLocatorEquals(rel->rd_locator, cat_state->locator))
+	if (!RelFileLocatorEquals(rel->rd_locator, clustered_rel_locator))
 		ereport(ERROR,
 				(errmsg("file of relation \"%s\" changed by another transaction",
 						RelationGetRelationName(rel))));
@@ -2842,7 +2854,7 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 
 		toastrel = table_open(reltoastrelid, AccessShareLock);
 		if (!RelFileLocatorEquals(toastrel->rd_locator,
-								  cat_state->locator_toast))
+								  clustered_rel_toast_locator))
 			ereport(ERROR,
 					(errmsg("file of relation \"%s\" changed by another transaction",
 							RelationGetRelationName(toastrel))));
