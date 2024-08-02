@@ -1,12 +1,12 @@
 Parsed test spec with 2 sessions
 
-starting permutation: cluster_concurrently change_existing change_new change_subxact1 change_subxact2 check2 wakeup check1
+starting permutation: wait_before_lock change_existing change_new change_subxact1 change_subxact2 check2 wakeup_before_lock check1
 injection_points_attach
 -----------------------
                        
 (1 row)
 
-step cluster_concurrently: 
+step wait_before_lock: 
 	CLUSTER (CONCURRENTLY) clstr_test USING clstr_test_pkey;
  <waiting ...>
 step change_existing: 
@@ -60,7 +60,7 @@ step check2:
 110|111
 (8 rows)
 
-step wakeup: 
+step wakeup_before_lock: 
 	SELECT injection_points_wakeup('cluster-concurrently-before-lock');
 
 injection_points_wakeup
@@ -68,7 +68,7 @@ injection_points_wakeup
                        
 (1 row)
 
-step cluster_concurrently: <... completed>
+step wait_before_lock: <... completed>
 step check1: 
 	INSERT INTO relfilenodes(node)
 	SELECT relfilenode FROM pg_class WHERE relname='clstr_test';
@@ -104,5 +104,10 @@ count
 count
 -----
     0
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
 (1 row)
 

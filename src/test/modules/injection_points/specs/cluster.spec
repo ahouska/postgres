@@ -17,6 +17,10 @@ teardown
 {
 	DROP TABLE clstr_test;
 	DROP EXTENSION injection_points;
+
+	DROP TABLE relfilenodes;
+	DROP TABLE data_s1;
+	DROP TABLE data_s2;
 }
 
 session s1
@@ -26,7 +30,7 @@ setup
 	SELECT injection_points_attach('cluster-concurrently-before-lock', 'wait');
 }
 # Perform the initial load and wait for s2 to do some data changes.
-step cluster_concurrently
+step wait_before_lock
 {
 	CLUSTER (CONCURRENTLY) clstr_test USING clstr_test_pkey;
 }
@@ -54,6 +58,10 @@ step check1
 	SELECT count(*)
 	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (_xmin, _cmin, i, j)
 	WHERE d1.i ISNULL OR d2.i ISNULL;
+}
+teardown
+{
+    SELECT injection_points_detach('cluster-concurrently-before-lock');
 }
 
 session s2
@@ -114,17 +122,19 @@ step check2
 	INSERT INTO data_s2(_xmin, _cmin, i, j)
 	SELECT xmin, cmin, i, j FROM clstr_test;
 }
-step wakeup
+step wakeup_before_lock
 {
 	SELECT injection_points_wakeup('cluster-concurrently-before-lock');
 }
 
+# Test if data changes introduced while one session is performing CLUSTER
+# (CONCURRENTLY) find their way into the table.
 permutation
-	cluster_concurrently
+	wait_before_lock
 	change_existing
 	change_new
 	change_subxact1
 	change_subxact2
 	check2
-	wakeup
+	wakeup_before_lock
 	check1
