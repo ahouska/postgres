@@ -2787,7 +2787,7 @@ psql_completion(const char *text, int start, int end)
 		 * one word, so the above test is correct.
 		 */
 		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
-			COMPLETE_WITH("VERBOSE");
+			COMPLETE_WITH("VERBOSE", "CONCURRENTLY");
 	}
 
 /* COMMENT */
@@ -4758,7 +4758,8 @@ psql_completion(const char *text, int start, int end)
 						  "DISABLE_PAGE_SKIPPING", "SKIP_LOCKED",
 						  "INDEX_CLEANUP", "PROCESS_MAIN", "PROCESS_TOAST",
 						  "TRUNCATE", "PARALLEL", "SKIP_DATABASE_STATS",
-						  "ONLY_DATABASE_STATS", "BUFFER_USAGE_LIMIT");
+						  "ONLY_DATABASE_STATS", "BUFFER_USAGE_LIMIT",
+						  "CONCURRENTLY");
 		else if (TailMatches("FULL|FREEZE|ANALYZE|VERBOSE|DISABLE_PAGE_SKIPPING|SKIP_LOCKED|PROCESS_MAIN|PROCESS_TOAST|TRUNCATE|SKIP_DATABASE_STATS|ONLY_DATABASE_STATS"))
 			COMPLETE_WITH("ON", "OFF");
 		else if (TailMatches("INDEX_CLEANUP"))
