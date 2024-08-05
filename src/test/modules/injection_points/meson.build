@@ -42,7 +42,10 @@ tests += {
   'isolation': {
     'specs': [
       'inplace',
+      'cluster',
     ],
+    # 'cluster' requires wal_level = 'logical'.
+    'regress_args': ['--temp-config', files('logical.conf')],
   },
   'tap': {
     'env': {
