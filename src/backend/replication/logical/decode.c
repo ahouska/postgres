@@ -478,9 +478,9 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	 */
 
 	/*
-	 * First, check if CLUSTER CONCURRENTLY is in progress. If so, only decode
-	 * data changes of the table that it is processing, and of its TOAST
-	 * relation.
+	 * First, check if CLUSTER CONCURRENTLY is being performed by this
+	 * backend. If so, only decode data changes of the table that it is
+	 * processing, and the changes of its TOAST relation.
 	 *
 	 * (TOAST locator should not be set unless the main is.)
 	 */
