@@ -3609,8 +3609,8 @@ process_concurrent_changes(LogicalDecodingContext *ctx, XLogRecPtr end_of_wal,
 			rel_dst->rd_toastoid = rel_src->rd_rel->reltoastrelid;
 
 		apply_concurrent_changes(dstate, rel_dst, ident_key,
-								 ident_key_nentries, iistate, rwstate,
-								 must_complete);
+								 ident_key_nentries, iistate, must_complete,
+								 rwstate);
 	}
 	PG_FINALLY();
 	{
