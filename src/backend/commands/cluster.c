@@ -17,6 +17,8 @@
  */
 #include "postgres.h"
 
+#include <sys/time.h>
+
 #include "access/amapi.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
