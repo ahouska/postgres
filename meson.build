@@ -268,6 +268,10 @@ elif host_system == 'windows'
   exesuffix = '.exe'
   dlsuffix = '.dll'
   library_path_var = ''
+  if cc.get_id() != 'msvc'
+    # define before including <time.h> for getting localtime_r() etc. on MinGW
+    cppflags += '-D_POSIX_C_SOURCE'
+  endif
 
   export_file_format = 'win'
   export_file_suffix = 'def'
@@ -2394,7 +2398,6 @@ header_checks = [
   'execinfo.h',
   'getopt.h',
   'ifaddrs.h',
-  'langinfo.h',
   'mbarrier.h',
   'stdbool.h',
   'strings.h',
@@ -3037,7 +3040,7 @@ frontend_common_code = declare_dependency(
   compile_args: ['-DFRONTEND'],
   include_directories: [postgres_inc],
   sources: generated_headers,
-  dependencies: [os_deps, zlib, zstd],
+  dependencies: [os_deps, zlib, zstd, lz4],
 )
 
 backend_common_code = declare_dependency(

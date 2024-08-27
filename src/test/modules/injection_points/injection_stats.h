@@ -15,6 +15,9 @@
 #ifndef INJECTION_STATS
 #define INJECTION_STATS
 
+/* GUC variable */
+extern bool inj_stats_enabled;
+
 /* injection_stats.c */
 extern void pgstat_register_inj(void);
 extern void pgstat_create_inj(const char *name);
@@ -25,6 +28,8 @@ extern void pgstat_report_inj(const char *name);
 extern void pgstat_register_inj_fixed(void);
 extern void pgstat_report_inj_fixed(uint32 numattach,
 									uint32 numdetach,
-									uint32 numrun);
+									uint32 numrun,
+									uint32 numcached,
+									uint32 numloaded);
 
 #endif
