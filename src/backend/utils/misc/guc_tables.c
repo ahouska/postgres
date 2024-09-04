@@ -2070,7 +2070,7 @@ struct config_bool ConfigureNamesBool[] =
 
 	{
 		{"sync_replication_slots", PGC_SIGHUP, REPLICATION_STANDBY,
-			gettext_noop("Enables a physical standby to synchronize logical failover slots from the primary server."),
+			gettext_noop("Enables a physical standby to synchronize logical failover replication slots from the primary server."),
 		},
 		&sync_replication_slots,
 		false,
@@ -2357,7 +2357,7 @@ struct config_int ConfigureNamesInt[] =
 	{
 		{"commit_timestamp_buffers", PGC_POSTMASTER, RESOURCES_MEM,
 			gettext_noop("Sets the size of the dedicated buffer pool used for the commit timestamp cache."),
-			gettext_noop("Specify 0 to have this value determined as a fraction of shared_buffers."),
+			gettext_noop("Specify 0 to have this value determined as a fraction of \"shared_buffers\"."),
 			GUC_UNIT_BLOCKS
 		},
 		&commit_timestamp_buffers,
@@ -2411,8 +2411,8 @@ struct config_int ConfigureNamesInt[] =
 
 	{
 		{"subtransaction_buffers", PGC_POSTMASTER, RESOURCES_MEM,
-			gettext_noop("Sets the size of the dedicated buffer pool used for the sub-transaction cache."),
-			gettext_noop("Specify 0 to have this value determined as a fraction of shared_buffers."),
+			gettext_noop("Sets the size of the dedicated buffer pool used for the subtransaction cache."),
+			gettext_noop("Specify 0 to have this value determined as a fraction of \"shared_buffers\"."),
 			GUC_UNIT_BLOCKS
 		},
 		&subtransaction_buffers,
@@ -2423,7 +2423,7 @@ struct config_int ConfigureNamesInt[] =
 	{
 		{"transaction_buffers", PGC_POSTMASTER, RESOURCES_MEM,
 			gettext_noop("Sets the size of the dedicated buffer pool used for the transaction status cache."),
-			gettext_noop("Specify 0 to have this value determined as a fraction of shared_buffers."),
+			gettext_noop("Specify 0 to have this value determined as a fraction of \"shared_buffers\"."),
 			GUC_UNIT_BLOCKS
 		},
 		&transaction_buffers,
@@ -2956,7 +2956,7 @@ struct config_int ConfigureNamesInt[] =
 	{
 		{"wal_buffers", PGC_POSTMASTER, WAL_SETTINGS,
 			gettext_noop("Sets the number of disk-page buffers in shared memory for WAL."),
-			gettext_noop("Specify -1 to have this value determined as a fraction of shared_buffers."),
+			gettext_noop("Specify -1 to have this value determined as a fraction of \"shared_buffers\"."),
 			GUC_UNIT_XBLOCKS
 		},
 		&XLOGbuffers,
@@ -3082,7 +3082,7 @@ struct config_int ConfigureNamesInt[] =
 		{"log_min_duration_sample", PGC_SUSET, LOGGING_WHEN,
 			gettext_noop("Sets the minimum execution time above which "
 						 "a sample of statements will be logged."
-						 " Sampling is determined by log_statement_sample_rate."),
+						 " Sampling is determined by \"log_statement_sample_rate\"."),
 			gettext_noop("Zero logs a sample of all queries. -1 turns this feature off."),
 			GUC_UNIT_MS
 		},
@@ -4774,11 +4774,11 @@ struct config_string ConfigureNamesString[] =
 
 	{
 		{"synchronized_standby_slots", PGC_SIGHUP, REPLICATION_PRIMARY,
-			gettext_noop("Lists streaming replication standby server slot "
+			gettext_noop("Lists streaming replication standby server replication slot "
 						 "names that logical WAL sender processes will wait for."),
 			gettext_noop("Logical WAL sender processes will send decoded "
-						 "changes to plugins only after the specified  "
-						 "replication slots confirm receiving WAL."),
+						 "changes to output plugins only after the specified "
+						 "replication slots have confirmed receiving WAL."),
 			GUC_LIST_INPUT
 		},
 		&synchronized_standby_slots,
@@ -4788,7 +4788,7 @@ struct config_string ConfigureNamesString[] =
 
 	{
 		{"restrict_nonsystem_relation_kind", PGC_USERSET, CLIENT_CONN_STATEMENT,
-			gettext_noop("Sets relation kinds of non-system relation to restrict use"),
+			gettext_noop("Prohibits access to non-system relations of specified kinds."),
 			NULL,
 			GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE
 		},

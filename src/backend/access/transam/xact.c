@@ -660,7 +660,7 @@ AssignTransactionId(TransactionState s)
 	if (IsInParallelMode() || IsParallelWorker())
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-				 errmsg("cannot assign XIDs during a parallel operation")));
+				 errmsg("cannot assign transaction IDs during a parallel operation")));
 
 	/*
 	 * Ensure parent(s) have XIDs, so that a child always has an XID later
@@ -6003,7 +6003,7 @@ XactLogCommitRecord(TimestampTz commit_time,
 	{
 		XLogRegisterData((char *) (&xl_twophase), sizeof(xl_xact_twophase));
 		if (xl_xinfo.xinfo & XACT_XINFO_HAS_GID)
-			XLogRegisterData(unconstify(char *, twophase_gid), strlen(twophase_gid) + 1);
+			XLogRegisterData(twophase_gid, strlen(twophase_gid) + 1);
 	}
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_ORIGIN)
@@ -6149,7 +6149,7 @@ XactLogAbortRecord(TimestampTz abort_time,
 	{
 		XLogRegisterData((char *) (&xl_twophase), sizeof(xl_xact_twophase));
 		if (xl_xinfo.xinfo & XACT_XINFO_HAS_GID)
-			XLogRegisterData(unconstify(char *, twophase_gid), strlen(twophase_gid) + 1);
+			XLogRegisterData(twophase_gid, strlen(twophase_gid) + 1);
 	}
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_ORIGIN)
