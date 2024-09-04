@@ -175,7 +175,7 @@ typedef struct CatalogState
 static XLogSegNo	cluster_current_segment = 0;
 
 static void cluster_multiple_rels(List *rtcs, ClusterParams *params,
-								  LOCKMODE lock_mode, bool isTopLevel);
+								  LOCKMODE lockmode, bool isTopLevel);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 bool concurrent);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
@@ -316,7 +316,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 	Oid			indexOid = InvalidOid;
 	MemoryContext cluster_context;
 	List	   *rtcs;
-	LOCKMODE lock_mode;
+	LOCKMODE lockmode;
 
 	/* Parse option list */
 	foreach(lc, stmt->params)
@@ -348,7 +348,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 	 * of processing, supposedly for very short time. Until then, we'll have
 	 * to unlock the relation temporarily, so there's no lock-upgrade hazard.
 	 */
-	lock_mode = (params.options & CLUOPT_CONCURRENT) == 0 ?
+	lockmode = (params.options & CLUOPT_CONCURRENT) == 0 ?
 		AccessExclusiveLock : LOCK_CLUSTER_CONCURRENT;
 
 	if (stmt->relation != NULL)
@@ -358,7 +358,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 
 		/* Find, lock, and check permissions on the table. */
 		tableOid = RangeVarGetRelidExtended(stmt->relation,
-											lock_mode,
+											lockmode,
 											0,
 											RangeVarCallbackMaintainsTable,
 											NULL);
@@ -452,7 +452,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 		rtcs = get_tables_to_cluster_partitioned(cluster_context, indexOid);
 
 		/* close relation, releasing lock on parent table */
-		table_close(rel, lock_mode);
+		table_close(rel, lockmode);
 	}
 	else
 	{
@@ -461,7 +461,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 	}
 
 	/* Do the job. */
-	cluster_multiple_rels(rtcs, &params, lock_mode, isTopLevel);
+	cluster_multiple_rels(rtcs, &params, lockmode, isTopLevel);
 
 	/* Start a new transaction for the cleanup work. */
 	StartTransactionCommand();
@@ -478,7 +478,7 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
  * return.
  */
 static void
-cluster_multiple_rels(List *rtcs, ClusterParams *params, LOCKMODE lock_mode,
+cluster_multiple_rels(List *rtcs, ClusterParams *params, LOCKMODE lockmode,
 					  bool isTopLevel)
 {
 	ListCell   *lc;
@@ -499,7 +499,7 @@ cluster_multiple_rels(List *rtcs, ClusterParams *params, LOCKMODE lock_mode,
 		/* functions in indexes may want a snapshot set */
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		rel = table_open(rtc->tableOid, lock_mode);
+		rel = table_open(rtc->tableOid, lockmode);
 
 		/* Not all relations cannot be processed in the concurrent mode. */
 		if ((params->options & CLUOPT_CONCURRENT) == 0 ||
@@ -511,7 +511,7 @@ cluster_multiple_rels(List *rtcs, ClusterParams *params, LOCKMODE lock_mode,
 			cluster_rel(rel, rtc->indexOid, params, isTopLevel);
 		}
 		else
-			table_close(rel, lock_mode);
+			table_close(rel, lockmode);
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
@@ -944,7 +944,7 @@ check_relation_is_clusterable_concurrently(Relation rel, int elevel,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 errhint("%s is not supported for catalog relations", stmt)));
+				 errhint("%s is not supported for catalog relations.", stmt)));
 		return false;
 	}
 
@@ -954,7 +954,7 @@ check_relation_is_clusterable_concurrently(Relation rel, int elevel,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 errhint("%s is not supported for TOAST relations, unless the main relation is processed too",
+				 errhint("%s is not supported for TOAST relations, unless the main relation is processed too.",
 						 stmt)));
 		return false;
 	}
@@ -966,7 +966,8 @@ check_relation_is_clusterable_concurrently(Relation rel, int elevel,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 errhint("CLUSTER CONCURRENTLY is only allowed for permanent relations")));
+				 errhint("%s is only allowed for permanent relations.",
+						 stmt)));
 		return false;
 	}
 
@@ -978,7 +979,7 @@ check_relation_is_clusterable_concurrently(Relation rel, int elevel,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 errhint("relation \"%s\" has insufficient replication identity",
+				 errhint("Relation \"%s\" has insufficient replication identity.",
 						 RelationGetRelationName(rel))));
 		return false;
 	}
@@ -996,7 +997,7 @@ check_relation_is_clusterable_concurrently(Relation rel, int elevel,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 (errhint("relation \"%s\" has no identity index",
+				 (errhint("Relation \"%s\" has no identity index.",
 						  RelationGetRelationName(rel)))));
 		return false;
 	}
@@ -1463,7 +1464,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 		ResourceOwner	oldowner = CurrentResourceOwner;
 
 		/*
-		 * In the CONCURRENT case, do the planning in a subtrensaction so that
+		 * In the CONCURRENT case, do the planning in a subtransaction so that
 		 * we don't leave any additional locks behind us that we cannot
 		 * release easily.
 		 */
@@ -2454,7 +2455,7 @@ begin_concurrent_cluster(Relation *rel_p, Relation *index_p,
 	if (entry == NULL)
 		ereport(ERROR,
 				(errmsg("too many requests for CLUSTER CONCURRENTLY at a time")),
-				(errhint("consider increasing the \"max_replication_slots\" configuration parameter")));
+				(errhint("Please consider increasing the \"max_replication_slots\" configuration parameter.")));
 
 	/*
 	 * Even if the insertion of TOAST relid should fail below, the caller has
@@ -2495,7 +2496,7 @@ begin_concurrent_cluster(Relation *rel_p, Relation *index_p,
 		if (entry == NULL)
 			ereport(ERROR,
 					(errmsg("too many requests for CLUSTER CONCURRENT at a time")),
-					(errhint("consider increasing the \"max_replication_slots\" configuration parameter")));
+					(errhint("Please consider increasing the \"max_replication_slots\" configuration parameter.")));
 
 		Assert(!OidIsValid(clustered_rel_toast));
 		clustered_rel_toast = toastrelid;
@@ -2768,19 +2769,19 @@ get_catalog_state(Relation rel)
 	{
 		Oid	ind_oid = lfirst_oid(lc);
 		Relation	index;
-		TupleDesc	td_src, td_dst;
+		TupleDesc	td_ind_src, td_ind_dst;
 
 		/*
-		 * Weaker lock should be o.k. for the index, but this one should break
-		 * anything either.
+		 * Weaker lock should be o.k. for the index, but this one should not
+		 * break anything either.
 		 */
 		index = index_open(ind_oid, ShareUpdateExclusiveLock);
 
 		result->ind_oids[i] = RelationGetRelid(index);
-		td_src = RelationGetDescr(index);
-		td_dst = palloc(TupleDescSize(td_src));
-		TupleDescCopy(td_dst, td_src);
-		result->ind_tupdescs[i] = td_dst;
+		td_ind_src = RelationGetDescr(index);
+		td_ind_dst = palloc(TupleDescSize(td_ind_src));
+		TupleDescCopy(td_ind_dst, td_ind_src);
+		result->ind_tupdescs[i] = td_ind_dst;
 		i++;
 
 		index_close(index, ShareUpdateExclusiveLock);
@@ -2840,7 +2841,7 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 	Oid		reltoastrelid = rel->rd_rel->reltoastrelid;
 	List	*ind_oids;
 	ListCell	*lc;
-	LOCKMODE	lmode;
+	LOCKMODE	lockmode;
 	Oid		ident_idx;
 	TupleDesc	td, td_cp;
 
@@ -2911,8 +2912,8 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 		return;
 
 	/* No index should be dropped while we are checking the relation. */
-	lmode = ShareUpdateExclusiveLock;
-	Assert(CheckRelationLockedByMe(rel, lmode, true));
+	lockmode = ShareUpdateExclusiveLock;
+	Assert(CheckRelationLockedByMe(rel, lockmode, true));
 
 	ind_oids = RelationGetIndexList(rel);
 	if (list_length(ind_oids) != cat_state->ninds)
@@ -2941,13 +2942,13 @@ check_catalog_changes(Relation rel, CatalogState *cat_state)
 			goto failed_index;
 
 		/* Check the tuple descriptor. */
-		index = try_index_open(ind_oid, lmode);
+		index = try_index_open(ind_oid, lockmode);
 		if (index == NULL)
 			goto failed_index;
 		tupdesc = RelationGetDescr(index);
 		if (!equalTupleDescs(cat_state->ind_tupdescs[i], tupdesc))
 			goto failed_index;
-		index_close(index, lmode);
+		index_close(index, lockmode);
 	}
 
 	return;
@@ -3787,7 +3788,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 								   TransactionId frozenXid,
 								   MultiXactId cutoffMulti)
 {
-	LOCKMODE	lmode_old;
+	LOCKMODE	lockmode_old	PG_USED_FOR_ASSERTS_ONLY;
 	List	*ind_oids_new;
 	Oid		old_table_oid = RelationGetRelid(OldHeap);
 	Oid		new_table_oid = RelationGetRelid(NewHeap);
@@ -3809,10 +3810,10 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	struct timeval *t_end_ptr = NULL;
 
 	/* Like in cluster_rel(). */
-	lmode_old = LOCK_CLUSTER_CONCURRENT;
-	Assert(CheckRelationLockedByMe(OldHeap, lmode_old, false));
+	lockmode_old = LOCK_CLUSTER_CONCURRENT;
+	Assert(CheckRelationLockedByMe(OldHeap, lockmode_old, false));
 	Assert(cl_index == NULL ||
-		   CheckRelationLockedByMe(cl_index, lmode_old, false));
+		   CheckRelationLockedByMe(cl_index, lockmode_old, false));
 	/* This is expected from the caller. */
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
 
@@ -4425,7 +4426,7 @@ reopen_relations(RelReopenInfo *rels, int nrel)
 			ereport(ERROR,
 					(errmsg("could not open \%s \"%s\"", kind_str,
 							rri->relname),
-					 errhint("the %s could have been dropped by another transaction",
+					 errhint("The %s could have been dropped by another transaction.",
 							 kind_str)));
 		}
 		*rri->rel_p = rel;

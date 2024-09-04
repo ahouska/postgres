@@ -130,7 +130,7 @@ CLUSTER [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <r
       new files for the table and all the indexes, and deletes the old
       files. The <literal>ACCESS EXCLUSIVE</literal> lock is needed to make
       sure that the old files do not change during the processing because the
-      chnages would get lost due to the swap.
+      changes would get lost due to the swap.
      </para>
 
      <para>
@@ -142,10 +142,11 @@ CLUSTER [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] [ <r
       the <literal>ACCESS EXCLUSIVE</literal> lock is requested. Thus the lock
       is typically held only for the time needed to swap the files, which
       should be pretty short. However, the time might still be noticeable if
-      too many data changes have been done to the table
-      while <command>CLUSTER</command> was waiting for the lock: those changes
-      must be processed before the files are swapped. If you are worried about
-      this situation, set
+      too many data changes have been done to the table while
+      <command>CLUSTER</command> was waiting for the lock: those changes must
+      be processed just before the files are swapped, while the
+      <literal>ACCESS EXCLUSIVE</literal> lock is being held. If you are
+      worried about this situation, set
       the <link linkend="guc-cluster-max-xclock-time"><varname>cluster_max_xlock_time</varname></link>
       configuration parameter to a value that your applications can tolerate.
      </para>
