@@ -492,9 +492,9 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		XLogReaderState *r = buf->record;
 		RelFileLocator locator;
 
-		XLogRecGetBlockTag(r, 0, &locator, NULL, NULL);
-
-		if (!RelFileLocatorEquals(locator, clustered_rel_locator) &&
+		/* Not all records contain the block. */
+		if (XLogRecGetBlockTagExtended(r, 0, &locator, NULL, NULL, NULL) &&
+			!RelFileLocatorEquals(locator, clustered_rel_locator) &&
 			(!OidIsValid(clustered_rel_toast_locator.relNumber) ||
 			 !RelFileLocatorEquals(locator, clustered_rel_toast_locator)))
 			return;
