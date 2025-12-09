@@ -130,7 +130,7 @@ static void check_repack_concurrently_requirements(Relation rel);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 bool concurrent);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-							LogicalDecodingContext *decoding_ctx,
+							Snapshot snapshot, LogicalDecodingContext *decoding_ctx,
 							bool verbose,
 							bool *pSwapToastByContent,
 							TransactionId *pFreezeXid,
@@ -940,6 +940,9 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 * CONCURRENTLY.
 		 */
 		decoding_ctx = setup_logical_decoding(tableOid);
+
+		snapshot = SnapBuildInitialSnapshotForRepack(decoding_ctx->snapshot_builder);
+		PushActiveSnapshot(snapshot);
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -963,7 +966,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	NewHeap = table_open(OIDNewHeap, NoLock);
 
 	/* Copy the heap data into the new table in the desired order */
-	copy_table_data(NewHeap, OldHeap, index, decoding_ctx, verbose,
+	copy_table_data(NewHeap, OldHeap, index, snapshot, decoding_ctx, verbose,
 					&swap_toast_by_content, &frozenXid, &cutoffMulti);
 
 	/* The historic snapshot won't be needed anymore. */
@@ -1167,7 +1170,7 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
  */
 static void
 copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-				LogicalDecodingContext *decoding_ctx,
+				Snapshot snapshot, LogicalDecodingContext *decoding_ctx,
 				bool verbose, bool *pSwapToastByContent,
 				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti)
 {
@@ -1186,7 +1189,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
-	bool		concurrent = decoding_ctx != NULL;
+	bool		concurrent = snapshot != NULL;
 	LOCKMODE	lmode;
 
 	lmode = concurrent ? ShareUpdateExclusiveLock : AccessExclusiveLock;
@@ -1328,7 +1331,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * values (e.g. because the AM doesn't use freezing).
 	 */
 	table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
-									cutoffs.OldestXmin,
+									cutoffs.OldestXmin, snapshot,
 									decoding_ctx,
 									&cutoffs.FreezeLimit,
 									&cutoffs.MultiXactCutoff,

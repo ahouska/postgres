@@ -38,7 +38,6 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "replication/snapbuild.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
@@ -688,6 +687,7 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
+								 Snapshot snapshot,
 								 LogicalDecodingContext *decoding_ctx,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
@@ -709,8 +709,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool	   *isnull;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	bool		concurrent = decoding_ctx != NULL;
-	Snapshot	snapshot = NULL;
+	bool		concurrent = snapshot != NULL;
 	XLogRecPtr	end_of_wal_prev = GetFlushRecPtr(NULL);
 
 	/* Remember if it's a system catalog */
@@ -726,15 +725,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	natts = newTupDesc->natts;
 	values = (Datum *) palloc(natts * sizeof(Datum));
 	isnull = (bool *) palloc(natts * sizeof(bool));
-
-	/*
-	 * CONCURRENTLY needs the appropriate MVCC snapshot to copy the table.
-	 */
-	if (concurrent)
-	{
-		snapshot = SnapBuildInitialSnapshotForRepack(decoding_ctx->snapshot_builder);
-		PushActiveSnapshot(snapshot);
-	}
 
 	/*
 	 * Initialize the rewrite operation.
@@ -1000,8 +990,6 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		table_endscan(tableScan);
 	if (slot)
 		ExecDropSingleTupleTableSlot(slot);
-	if (snapshot)
-		PopActiveSnapshot();
 
 	/*
 	 * In scan-and-sort mode, complete the sort, then read out all live tuples
