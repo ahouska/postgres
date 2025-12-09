@@ -1107,7 +1107,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 * commands on top of those.
 		 */
 		CommandCounterIncrement();
-		UpdateActiveSnapshotCommandId();
 
 		Assert(!swap_toast_by_content);
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
