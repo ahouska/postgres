@@ -46,6 +46,7 @@ tests += {
       'basic',
       'inplace',
       'repack',
+      'repack_toast',
       'syscache-update-pruned',
       'index-concurrently-upsert',
       'index-concurrently-upsert-predicate',

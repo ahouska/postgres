@@ -446,10 +446,6 @@ extern HTSV_Result HeapTupleSatisfiesVacuumHorizon(HeapTuple htup, Buffer buffer
 												   TransactionId *dead_after);
 extern void HeapTupleSetHintBits(HeapTupleHeader tuple, Buffer buffer,
 								 uint16 infomask, TransactionId xid);
-extern bool HeapTupleMVCCInserted(HeapTuple htup, Snapshot snapshot,
-								  Buffer buffer);
-extern bool HeapTupleMVCCNotDeleted(HeapTuple htup, Snapshot snapshot,
-									Buffer buffer);
 extern bool HeapTupleHeaderIsOnlyLocked(HeapTupleHeader tuple);
 extern bool HeapTupleIsSurelyDead(HeapTuple htup,
 								  GlobalVisState *vistest);

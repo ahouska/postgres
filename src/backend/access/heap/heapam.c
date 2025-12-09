@@ -61,7 +61,7 @@ static XLogRecPtr log_heap_update(Relation reln, Buffer oldbuf,
 								  Buffer newbuf, HeapTuple oldtup,
 								  HeapTuple newtup, HeapTuple old_key_tuple,
 								  bool all_visible_cleared, bool new_all_visible_cleared,
-								  bool wal_logical);
+								  bool walLogical);
 #ifdef USE_ASSERT_CHECKING
 static void check_lock_if_inplace_updateable_rel(Relation relation,
 												 const ItemPointerData *otid,
@@ -2804,7 +2804,7 @@ xmax_infomask_changed(uint16 new_infomask, uint16 old_infomask)
 TM_Result
 heap_delete(Relation relation, const ItemPointerData *tid,
 			CommandId cid, Snapshot crosscheck, bool wait,
-			TM_FailureData *tmfd, bool changingPart, bool wal_logical)
+			TM_FailureData *tmfd, bool changingPart, bool walLogical)
 {
 	TM_Result	result;
 	TransactionId xid = GetCurrentTransactionId();
@@ -3051,7 +3051,7 @@ l1:
 	 * Compute replica identity tuple before entering the critical section so
 	 * we don't PANIC upon a memory allocation failure.
 	 */
-	old_key_tuple = wal_logical ?
+	old_key_tuple = walLogical ?
 		ExtractReplicaIdentity(relation, &tp, true, &old_key_copied) : NULL;
 
 	/*
@@ -3148,7 +3148,7 @@ l1:
 		 * XLH_DELETE_CONTAINS_OLD_KEY. Thus we need an extra flag. TODO
 		 * Consider not decoding tuples w/o the old tuple/key instead.
 		 */
-		if (!wal_logical)
+		if (!walLogical)
 			xlrec.flags |= XLH_DELETE_NO_LOGICAL;
 
 		XLogBeginInsert();
@@ -3244,7 +3244,7 @@ simple_heap_delete(Relation relation, const ItemPointerData *tid)
 						 GetCurrentCommandId(true), InvalidSnapshot,
 						 true /* wait for commit */ ,
 						 &tmfd, false,	/* changingPart */
-						 true /* wal_logical */ );
+						 true /* walLogical */ );
 	switch (result)
 	{
 		case TM_SelfModified:
@@ -3285,7 +3285,7 @@ TM_Result
 heap_update(Relation relation, const ItemPointerData *otid, HeapTuple newtup,
 			CommandId cid, Snapshot crosscheck, bool wait,
 			TM_FailureData *tmfd, LockTupleMode *lockmode,
-			TU_UpdateIndexes *update_indexes, bool wal_logical)
+			TU_UpdateIndexes *update_indexes, bool walLogical)
 {
 	TM_Result	result;
 	TransactionId xid = GetCurrentTransactionId();
@@ -4179,7 +4179,7 @@ l2:
 								 old_key_tuple,
 								 all_visible_cleared,
 								 all_visible_cleared_new,
-								 wal_logical);
+								 walLogical);
 		if (newbuf != buffer)
 		{
 			PageSetLSN(BufferGetPage(newbuf), recptr);
@@ -4538,7 +4538,7 @@ simple_heap_update(Relation relation, const ItemPointerData *otid, HeapTuple tup
 						 GetCurrentCommandId(true), InvalidSnapshot,
 						 true /* wait for commit */ ,
 						 &tmfd, &lockmode, update_indexes,
-						 true /* wal_logical */ );
+						 true /* walLogical */ );
 	switch (result)
 	{
 		case TM_SelfModified:
@@ -8879,7 +8879,7 @@ log_heap_update(Relation reln, Buffer oldbuf,
 				Buffer newbuf, HeapTuple oldtup, HeapTuple newtup,
 				HeapTuple old_key_tuple,
 				bool all_visible_cleared, bool new_all_visible_cleared,
-				bool wal_logical)
+				bool walLogical)
 {
 	xl_heap_update xlrec;
 	xl_heap_header xlhdr;
@@ -8891,7 +8891,7 @@ log_heap_update(Relation reln, Buffer oldbuf,
 	XLogRecPtr	recptr;
 	Page		page = BufferGetPage(newbuf);
 	bool		need_tuple_data = RelationIsLogicallyLogged(reln) &&
-		wal_logical;
+		walLogical;
 	bool		init;
 	int			bufflags;
 

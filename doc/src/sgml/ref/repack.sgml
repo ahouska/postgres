@@ -232,8 +232,8 @@ REPACK [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] USING
 
      <para>
       Note that <command>REPACK</command> with the
-      the <literal>CONCURRENTLY</literal> option does not try to order the
-      rows inserted into the table after the repacking started. Also
+      <literal>CONCURRENTLY</literal> option does not try to order the rows
+      inserted into the table after the repacking started. Also
       note <command>REPACK</command> might fail to complete due to DDL
       commands executed on the table by other transactions during the
       repacking.

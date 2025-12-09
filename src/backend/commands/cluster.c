@@ -111,12 +111,6 @@ typedef struct ChangeDest
 	Relation	rel;
 
 	/*
-	 * If valid, set rel->rd_toastoid to this for the time the changes are
-	 * being applied.
-	 */
-	Oid			toastrelid;
-
-	/*
 	 * The following is needed to find the existing tuple if the change is
 	 * UPDATE or DELETE. 'ident_key' should have all the fields except for
 	 * 'sk_argument' initialized.
@@ -133,8 +127,8 @@ static bool cluster_rel_recheck(RepackCommand cmd, Relation OldHeap,
 								Oid indexOid, Oid userid, LOCKMODE lmode,
 								int options);
 static void check_repack_concurrently_requirements(Relation rel);
-static void rebuild_relation(RepackCommand cmd, Relation OldHeap, Relation index,
-							 bool verbose, bool concurrently);
+static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
+							 bool concurrent);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 							Snapshot snapshot, LogicalDecodingContext *decoding_ctx,
 							bool verbose,
@@ -155,16 +149,14 @@ static LogicalDecodingContext *setup_logical_decoding(Oid relid);
 static HeapTuple get_changed_tuple(char *change);
 static void apply_concurrent_changes(RepackDecodingState *dstate,
 									 ChangeDest *dest);
-static void apply_concurrent_insert(Relation rel, ConcurrentChange *change,
-									HeapTuple tup, IndexInsertState *iistate,
+static void apply_concurrent_insert(Relation rel, HeapTuple tup,
+									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
 static void apply_concurrent_update(Relation rel, HeapTuple tup,
 									HeapTuple tup_target,
-									ConcurrentChange *change,
 									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
-static void apply_concurrent_delete(Relation rel, HeapTuple tup_target,
-									ConcurrentChange *change);
+static void apply_concurrent_delete(Relation rel, HeapTuple tup_target);
 static HeapTuple find_target_tuple(Relation rel, ChangeDest *dest,
 								   HeapTuple tup_key,
 								   TupleTableSlot *ident_slot);
@@ -181,7 +173,6 @@ static void cleanup_logical_decoding(LogicalDecodingContext *ctx);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 											   Relation cl_index,
 											   LogicalDecodingContext *decoding_ctx,
-											   bool swap_toast_by_content,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
@@ -621,8 +612,8 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		if (concurrent)
 			begin_concurrent_repack(OldHeap);
 
-		rebuild_relation(cmd, OldHeap, index, /* save_userid, */
-						 verbose, concurrent);
+		rebuild_relation(OldHeap, index, /* save_userid, */ verbose,
+						 concurrent);
 	}
 	PG_FINALLY();
 	{
@@ -913,8 +904,7 @@ check_repack_concurrently_requirements(Relation rel)
  * (The function handles the lock upgrade if 'concurrent' is true.)
  */
 static void
-rebuild_relation(RepackCommand cmd, Relation OldHeap, Relation index,
-				 bool verbose, bool concurrent)
+rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent)
 {
 	Oid			tableOid = RelationGetRelid(OldHeap);
 	Oid			accessMethod = OldHeap->rd_rel->relam;
@@ -999,8 +989,9 @@ rebuild_relation(RepackCommand cmd, Relation OldHeap, Relation index,
 		CommandCounterIncrement();
 		UpdateActiveSnapshotCommandId();
 
+		Assert(!swap_toast_by_content);
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
-										   decoding_ctx, swap_toast_by_content,
+										   decoding_ctx,
 										   frozenXid, cutoffMulti);
 		PopActiveSnapshot();
 
@@ -1198,8 +1189,10 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
-
 	bool		concurrent = snapshot != NULL;
+	LOCKMODE	lmode;
+
+	lmode = concurrent ? ShareUpdateExclusiveLock : AccessExclusiveLock;
 
 	pg_rusage_init(&ru0);
 
@@ -1228,7 +1221,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * will be held till end of transaction.
 	 */
 	if (OldHeap->rd_rel->reltoastrelid)
-		LockRelationOid(OldHeap->rd_rel->reltoastrelid, AccessExclusiveLock);
+		LockRelationOid(OldHeap->rd_rel->reltoastrelid, lmode);
 
 	/*
 	 * If both tables have TOAST tables, perform toast swap by content.  It is
@@ -1237,7 +1230,8 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * swap by links.  This is okay because swap by content is only essential
 	 * for system catalogs, and we don't support schema changes for them.
 	 */
-	if (OldHeap->rd_rel->reltoastrelid && NewHeap->rd_rel->reltoastrelid)
+	if (OldHeap->rd_rel->reltoastrelid && NewHeap->rd_rel->reltoastrelid &&
+		!concurrent)
 	{
 		*pSwapToastByContent = true;
 
@@ -1258,6 +1252,10 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 		 * follow the toast pointers to the wrong place.  (It would actually
 		 * work for values copied over from the old toast table, but not for
 		 * any values that we toast which were previously not toasted.)
+		 *
+		 * This would not work with CONCURRENTLY because we may need to delete
+		 * TOASTed tuples from the new heap. With this hack, we'd delete them
+		 * from the old heap.
 		 */
 		NewHeap->rd_toastoid = OldHeap->rd_rel->reltoastrelid;
 	}
@@ -1303,48 +1301,8 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * provided, else plain seqscan.
 	 */
 	if (OldIndex != NULL && OldIndex->rd_rel->relam == BTREE_AM_OID)
-	{
-		ResourceOwner oldowner = NULL;
-		ResourceOwner resowner = NULL;
-
-		/*
-		 * In the CONCURRENT case, use a dedicated resource owner so we don't
-		 * leave any additional locks behind us that we cannot release easily.
-		 */
-		if (concurrent)
-		{
-			Assert(CheckRelationLockedByMe(OldHeap, ShareUpdateExclusiveLock,
-										   false));
-			Assert(CheckRelationLockedByMe(OldIndex, ShareUpdateExclusiveLock,
-										   false));
-
-			resowner = ResourceOwnerCreate(CurrentResourceOwner,
-										   "plan_cluster_use_sort");
-			oldowner = CurrentResourceOwner;
-			CurrentResourceOwner = resowner;
-		}
-
 		use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
 										 RelationGetRelid(OldIndex));
-
-		if (concurrent)
-		{
-			CurrentResourceOwner = oldowner;
-
-			/*
-			 * We are primarily concerned about locks, but if the planner
-			 * happened to allocate any other resources, we should release
-			 * them too because we're going to delete the whole resowner.
-			 */
-			ResourceOwnerRelease(resowner, RESOURCE_RELEASE_BEFORE_LOCKS,
-								 false, false);
-			ResourceOwnerRelease(resowner, RESOURCE_RELEASE_LOCKS,
-								 false, false);
-			ResourceOwnerRelease(resowner, RESOURCE_RELEASE_AFTER_LOCKS,
-								 false, false);
-			ResourceOwnerDelete(resowner);
-		}
-	}
 	else
 		use_sort = false;
 
@@ -1870,6 +1828,12 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 						(OIDOldHeap == RelationRelationId),
 						swap_toast_by_content, is_internal,
 						frozenXid, cutoffMulti, mapped_tables);
+	/*
+	 * Make sure the changes are visible, so that the correct objects are
+	 * dropped below. (Other operations might do this before the deletion, but
+	 * don't let us rely on that.)
+	 */
+	CommandCounterIncrement();
 
 	/*
 	 * If it's a system catalog, queue a sinval message to flush all catcaches
@@ -2001,7 +1965,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 
 			/* Get the associated valid index to be renamed */
 			toastidx = toast_get_valid_index(newrel->rd_rel->reltoastrelid,
-											 NoLock);
+											 AccessExclusiveLock);
 
 			/* rename the toast table ... */
 			snprintf(NewToastName, NAMEDATALEN, "pg_toast_%u",
@@ -2700,8 +2664,7 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 		{
 			Assert(tup_old == NULL);
 
-			apply_concurrent_insert(rel, &change, tup, dest->iistate,
-									index_slot);
+			apply_concurrent_insert(rel, tup, dest->iistate, index_slot);
 
 			pfree(tup);
 		}
@@ -2725,13 +2688,13 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 			 */
 			tup_exist = find_target_tuple(rel, dest, tup_key, ident_slot);
 			if (tup_exist == NULL)
-				elog(ERROR, "Failed to find target tuple");
+				elog(ERROR, "failed to find target tuple");
 
 			if (change.kind == CHANGE_UPDATE_NEW)
-				apply_concurrent_update(rel, tup, tup_exist, &change,
-										dest->iistate, index_slot);
+				apply_concurrent_update(rel, tup, tup_exist, dest->iistate,
+										index_slot);
 			else
-				apply_concurrent_delete(rel, tup_exist, &change);
+				apply_concurrent_delete(rel, tup_exist);
 
 			if (tup_old != NULL)
 			{
@@ -2742,7 +2705,7 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 			pfree(tup);
 		}
 		else
-			elog(ERROR, "Unrecognized kind of change: %d", change.kind);
+			elog(ERROR, "unrecognized kind of change: %d", change.kind);
 
 		/*
 		 * If a change was applied now, increment CID for next writes and
@@ -2768,8 +2731,8 @@ apply_concurrent_changes(RepackDecodingState *dstate, ChangeDest *dest)
 }
 
 static void
-apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
-						IndexInsertState *iistate, TupleTableSlot *index_slot)
+apply_concurrent_insert(Relation rel, HeapTuple tup, IndexInsertState *iistate,
+						TupleTableSlot *index_slot)
 {
 	List	   *recheck;
 
@@ -2811,8 +2774,7 @@ apply_concurrent_insert(Relation rel, ConcurrentChange *change, HeapTuple tup,
 
 static void
 apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
-						ConcurrentChange *change, IndexInsertState *iistate,
-						TupleTableSlot *index_slot)
+						IndexInsertState *iistate, TupleTableSlot *index_slot)
 {
 	LockTupleMode lockmode;
 	TM_FailureData tmfd;
@@ -2856,8 +2818,7 @@ apply_concurrent_update(Relation rel, HeapTuple tup, HeapTuple tup_target,
 }
 
 static void
-apply_concurrent_delete(Relation rel, HeapTuple tup_target,
-						ConcurrentChange *change)
+apply_concurrent_delete(Relation rel, HeapTuple tup_target)
 {
 	TM_Result	res;
 	TM_FailureData tmfd;
@@ -2954,28 +2915,7 @@ process_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 	if (dstate->nchanges == 0)
 		return;
 
-	PG_TRY();
-	{
-		/*
-		 * Make sure that TOAST values can eventually be accessed via the old
-		 * relation - see comment in copy_table_data().
-		 */
-		if (OidIsValid(dest->toastrelid))
-			dest->rel->rd_toastoid = dest->toastrelid;
-
-		apply_concurrent_changes(dstate, dest);
-	}
-
-	/*
-	 * TODO Consider if the setting needs to be reverted: rel_dst will
-	 * eventually be dropped, w/o other transactions being able to access it.
-	 */
-	PG_FINALLY();
-	{
-		if (OidIsValid(dest->toastrelid))
-			dest->rel->rd_toastoid = InvalidOid;
-	}
-	PG_END_TRY();
+	apply_concurrent_changes(dstate, dest);
 }
 
 /*
@@ -3012,7 +2952,7 @@ get_index_insert_state(Relation relation, Oid ident_index_id,
 			ident_index = ind_rel;
 	}
 	if (ident_index == NULL)
-		elog(ERROR, "Failed to open identity index");
+		elog(ERROR, "failed to open identity index");
 
 	/* Only initialize fields needed by ExecInsertIndexTuples(). */
 	result->estate = estate;
@@ -3058,7 +2998,7 @@ build_identity_key(Oid ident_idx_oid, Relation rel_src, int *nentries)
 			att = TupleDescAttr(desc, relattno - 1);
 		}
 		else
-			elog(ERROR, "Unexpected attribute number %d in index", relattno);
+			elog(ERROR, "unexpected attribute number %d in index", relattno);
 
 		opfamily = ident_idx_rel->rd_opfamily[i];
 		opcintype = ident_idx_rel->rd_opcintype[i];
@@ -3066,11 +3006,11 @@ build_identity_key(Oid ident_idx_oid, Relation rel_src, int *nentries)
 								   BTEqualStrategyNumber);
 
 		if (!OidIsValid(opno))
-			elog(ERROR, "Failed to find = operator for type %u", opcintype);
+			elog(ERROR, "failed to find = operator for type %u", opcintype);
 
 		opcode = get_opcode(opno);
 		if (!OidIsValid(opcode))
-			elog(ERROR, "Failed to find = operator for operator %u", opno);
+			elog(ERROR, "failed to find = operator for operator %u", opno);
 
 		/* Initialize everything but argument. */
 		ScanKeyInit(entry,
@@ -3125,7 +3065,6 @@ static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 								   Relation cl_index,
 								   LogicalDecodingContext *decoding_ctx,
-								   bool swap_toast_by_content,
 								   TransactionId frozenXid,
 								   MultiXactId cutoffMulti)
 {
@@ -3166,23 +3105,13 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 * the heap storage yet.
 	 *
 	 * index_create() will lock the new indexes using AccessExclusiveLock - no
-	 * need to change that.
-	 *
-	 * We assume that ShareUpdateExclusiveLock on the table prevents anyone
-	 * from dropping the existing indexes or adding new ones, so the lists of
-	 * old and new indexes should match at the swap time. On the other hand we
-	 * do not block ALTER INDEX commands that do not require table lock (e.g.
-	 * ALTER INDEX ... SET ...).
-	 *
-	 * XXX Should we check a the end of our work if another transaction
-	 * executed such a command and issue a NOTICE that we might have discarded
-	 * its effects? (For example, someone changes storage parameter after we
-	 * have created the new index, the new value of that parameter is lost.)
-	 * Alternatively, we can lock all the indexes now in a mode that blocks
-	 * all the ALTER INDEX commands (ShareUpdateExclusiveLock ?), and keep
-	 * them locked till the end of the transactions. That might increase the
-	 * risk of deadlock during the lock upgrade below, however SELECT / DML
-	 * queries should not be involved in such a deadlock.
+	 * need to change that. At the same time, we use ShareUpdateExclusiveLock
+	 * to lock the existing indexes - that should be enough to prevent others
+	 * from changing them while we're repacking the relation. The lock on
+	 * table should prevent others from changing the index column list, but
+	 * might not be enough for commands like ALTER INDEX ... SET ... (Those
+	 * are not necessarily dangerous, but can make user confused if the
+	 * changes they do get lost due to REPACK.)
 	 */
 	ind_oids_new = build_new_indexes(NewHeap, OldHeap, ind_oids_old);
 
@@ -3205,17 +3134,14 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 		}
 	}
 	if (!OidIsValid(ident_idx_new))
-
 		/*
 		 * Should not happen, given our lock on the old relation.
 		 */
 		ereport(ERROR,
-				(errmsg("Identity index missing on the new relation")));
+				(errmsg("identity index missing on the new relation")));
 
 	/* Gather information to apply concurrent changes. */
 	chgdst.rel = NewHeap;
-	chgdst.toastrelid = swap_toast_by_content ?
-		OldHeap->rd_rel->reltoastrelid : InvalidOid;
 	chgdst.iistate = get_index_insert_state(NewHeap, ident_idx_new,
 											&chgdst.ident_index);
 	chgdst.ident_key = build_identity_key(ident_idx_new, OldHeap,
@@ -3363,7 +3289,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 
 		swap_relation_files(ind_old, ind_new,
 							(old_table_oid == RelationRelationId),
-							swap_toast_by_content,
+							false, /* swap_toast_by_content */
 							true,
 							InvalidTransactionId,
 							InvalidMultiXactId,
@@ -3401,7 +3327,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	Assert(!is_system_catalog);
 	finish_heap_swap(old_table_oid, new_table_oid,
 					 is_system_catalog,
-					 swap_toast_by_content,
+					 false, /* swap_toast_by_content */
 					 false, true, false,
 					 frozenXid, cutoffMulti,
 					 relpersistence);
@@ -3410,7 +3336,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 /*
  * Build indexes on NewHeap according to those on OldHeap.
  *
- * OldIndexes is the list of index OIDs on OldHeap.
+ * OldIndexes is the list of index OIDs on OldHeap. The contained indexes end
+ * up locked using ShareUpdateExclusiveLock.
  *
  * A list of OIDs of the corresponding indexes created on NewHeap is
  * returned. The order of items does match, so we can use these arrays to swap
@@ -3433,7 +3360,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		Relation	ind;
 
 		ind_oid = lfirst_oid(lc);
-		ind = index_open(ind_oid, AccessShareLock);
+		ind = index_open(ind_oid, ShareUpdateExclusiveLock);
 
 		newName = ChooseRelationName(get_rel_name(ind_oid),
 									 NULL,
@@ -3445,7 +3372,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 										false);
 		result = lappend_oid(result, ind_oid_new);
 
-		index_close(ind, AccessShareLock);
+		index_close(ind, NoLock);
 	}
 
 	return result;

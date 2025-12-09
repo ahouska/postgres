@@ -3,7 +3,7 @@
  * pgoutput_repack.c
  *		Logical Replication output plugin for REPACK command
  *
- * Copyright (c) 2012-2024, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2025, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/replication/pgoutput_repack/pgoutput_repack.c
@@ -15,6 +15,7 @@
 #include "access/heaptoast.h"
 #include "commands/cluster.h"
 #include "replication/snapbuild.h"
+#include "utils/memutils.h"
 
 PG_MODULE_MAGIC;
 
@@ -203,7 +204,7 @@ store_change(LogicalDecodingContext *ctx, ConcurrentChangeKind kind,
 	}
 
 	/* XXX Isn't there any function / macro to do this? */
-	if (size >= 0x3FFFFFFF)
+	if (size >= MaxAllocSize)
 		elog(ERROR, "Change is too big.");
 
 	/* Construct the change. */

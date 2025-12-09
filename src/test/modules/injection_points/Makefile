@@ -15,6 +15,7 @@ REGRESS_OPTS = --dlpath=$(top_builddir)/src/test/regress
 ISOLATION = basic \
 	    inplace \
 	    repack \
+	    repack_toast \
 	    syscache-update-pruned \
 	    index-concurrently-upsert \
 	    index-concurrently-upsert-predicate \

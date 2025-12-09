@@ -1,5 +1,4 @@
-# Prefix the system columns with underscore as they are not allowed as column
-# names.
+# REPACK (CONCURRENTLY) ... USING INDEX ...;
 setup
 {
 	CREATE EXTENSION injection_points;
@@ -58,7 +57,7 @@ step check1
 }
 teardown
 {
-    SELECT injection_points_detach('repack-concurrently-before-lock');
+	SELECT injection_points_detach('repack-concurrently-before-lock');
 }
 
 session s2

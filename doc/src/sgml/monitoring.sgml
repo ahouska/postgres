@@ -6291,7 +6291,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <entry>
        <command>REPACK CONCURRENTLY</command> is currently processing the DML
        commands that other transactions executed during any of the preceding
-       phase.
+       phases.
      </entry>
     </row>
     <row>
