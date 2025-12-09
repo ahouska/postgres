@@ -612,8 +612,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		if (concurrent)
 			begin_concurrent_repack(OldHeap);
 
-		rebuild_relation(OldHeap, index, /* save_userid, */ verbose,
-						 concurrent);
+		rebuild_relation(OldHeap, index, verbose, concurrent);
 	}
 	PG_FINALLY();
 	{
