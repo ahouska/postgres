@@ -1941,12 +1941,6 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 						(OIDOldHeap == RelationRelationId),
 						swap_toast_by_content, is_internal,
 						frozenXid, cutoffMulti, mapped_tables);
-	/*
-	 * Make sure the changes are visible, so that the correct objects are
-	 * dropped below. (Other operations might do this before the deletion, but
-	 * don't let us rely on that.)
-	 */
-	CommandCounterIncrement();
 
 	/*
 	 * If it's a system catalog, queue a sinval message to flush all catcaches
@@ -2038,6 +2032,17 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	object.classId = RelationRelationId;
 	object.objectId = OIDNewHeap;
 	object.objectSubId = 0;
+
+	if (!reindex)
+	{
+		/*
+		 * Make sure the changes in pg_class are visible. This is especially
+		 * important if !swap_toast_by_content, so that the correct TOAST
+		 * relation is dropped. (reindex_relation() above did not help in this
+		 * case))
+		 */
+		CommandCounterIncrement();
+	}
 
 	/*
 	 * The new relation is local to our transaction and we know nothing
