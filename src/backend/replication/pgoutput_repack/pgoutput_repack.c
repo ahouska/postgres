@@ -168,82 +168,35 @@ store_change(LogicalDecodingContext *ctx, ConcurrentChangeKind kind,
 			 HeapTuple tuple)
 {
 	RepackDecodingState *dstate;
-	char	   *change_raw;
-	ConcurrentChange change;
+	char		kind_byte = (char) kind;
 	bool		flattened = false;
-	Size		size;
-	Datum		values[1];
-	bool		isnull[1];
-	char	   *dst,
-			   *dst_start;
 
 	dstate = (RepackDecodingState *) ctx->output_writer_private;
 
-	size = MAXALIGN(VARHDRSZ) + SizeOfConcurrentChange;
+	/* Store the change kind. */
+	BufFileWrite(dstate->file, &kind_byte, 1);
 
-	if (tuple)
+	/*
+	 * ReorderBufferCommit() stores the TOAST chunks in its private memory
+	 * context and frees them after having called apply_change().  Therefore
+	 * we need flat copy (including TOAST) that we eventually copy into the
+	 * memory context which is available to decode_concurrent_changes().
+	 */
+	if (HeapTupleHasExternal(tuple))
 	{
 		/*
-		 * ReorderBufferCommit() stores the TOAST chunks in its private memory
-		 * context and frees them after having called apply_change().
-		 * Therefore we need flat copy (including TOAST) that we eventually
-		 * copy into the memory context which is available to
-		 * decode_concurrent_changes().
+		 * toast_flatten_tuple_to_datum() might be more convenient but we
+		 * don't want the decompression it does.
 		 */
-		if (HeapTupleHasExternal(tuple))
-		{
-			/*
-			 * toast_flatten_tuple_to_datum() might be more convenient but we
-			 * don't want the decompression it does.
-			 */
-			tuple = toast_flatten_tuple(tuple, dstate->tupdesc);
-			flattened = true;
-		}
-
-		size += tuple->t_len;
+		tuple = toast_flatten_tuple(tuple, dstate->tupdesc);
+		flattened = true;
 	}
+	/* Store the tuple size ... */
+	BufFileWrite(dstate->file, &tuple->t_len, sizeof(tuple->t_len));
+	/* ... and the tuple itself. */
+	BufFileWrite(dstate->file, tuple->t_data, tuple->t_len);
 
-	/* XXX Isn't there any function / macro to do this? */
-	if (size >= MaxAllocSize)
-		elog(ERROR, "Change is too big.");
-
-	/* Construct the change. */
-	change_raw = (char *) palloc0(size);
-	SET_VARSIZE(change_raw, size);
-
-	/*
-	 * Since the varlena alignment might not be sufficient for the structure,
-	 * set the fields in a local instance and remember where it should
-	 * eventually be copied.
-	 */
-	change.kind = kind;
-	dst_start = (char *) VARDATA(change_raw);
-
-	/*
-	 * Copy the tuple.
-	 *
-	 * CAUTION: change->tup_data.t_data must be fixed on retrieval!
-	 */
-	memcpy(&change.tup_data, tuple, sizeof(HeapTupleData));
-	dst = dst_start + SizeOfConcurrentChange;
-	memcpy(dst, tuple->t_data, tuple->t_len);
-
-	/* The data has been copied. */
+	/* Free the flat copy if created above. */
 	if (flattened)
 		pfree(tuple);
-
-	/* Copy the structure so it can be stored. */
-	memcpy(dst_start, &change, SizeOfConcurrentChange);
-
-	/* Store as tuple of 1 bytea column. */
-	values[0] = PointerGetDatum(change_raw);
-	isnull[0] = false;
-	tuplestore_putvalues(dstate->tstore, dstate->tupdesc_change,
-						 values, isnull);
-
-	/* Accounting. */
-	dstate->nchanges++;
-
-	/* Cleanup. */
-	pfree(change_raw);
 }
