@@ -1099,12 +1099,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 
 	if (concurrent)
 	{
-		/*
-		 * Make sure we can find the tuples just inserted when applying DML
-		 * commands on top of those.
-		 */
-		CommandCounterIncrement();
-
 		Assert(!swap_toast_by_content);
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
 										   frozenXid, cutoffMulti, ctx);
@@ -2601,7 +2595,7 @@ setup_logical_decoding(Oid relid)
  * If true is returned, there is no more work for the worker.
  */
 static bool
-decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
+decode_concurrent_changes(LogicalDecodingContext *ctx,
 						  DecodingWorkerShared *shared)
 {
 	RepackDecodingState *dstate;
@@ -2610,7 +2604,7 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 	bool		done;
 	char		fname[MAXPGPATH];
 
-	dstate = (RepackDecodingState *) decoding_ctx->output_writer_private;
+	dstate = (RepackDecodingState *) ctx->output_writer_private;
 
 	/* Open the output file. */
 	DecodingWorkerFileName(fname, shared->relid,
@@ -2633,10 +2627,10 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 
 		CHECK_FOR_INTERRUPTS();
 
-		record = XLogReadRecord(decoding_ctx->reader, &errm);
+		record = XLogReadRecord(ctx->reader, &errm);
 		if (record)
 		{
-			LogicalDecodingProcessRecord(decoding_ctx, decoding_ctx->reader);
+			LogicalDecodingProcessRecord(ctx, ctx->reader);
 
 			/*
 			 * If WAL segment boundary has been crossed, inform the decoding
@@ -2647,7 +2641,7 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 			 * cannot be recycled anyway), however more frequent checks might
 			 * be beneficial for catalog_xmin.
 			 */
-			end_lsn = decoding_ctx->reader->EndRecPtr;
+			end_lsn = ctx->reader->EndRecPtr;
 			XLByteToSeg(end_lsn, segno_new, wal_segment_size);
 			if (segno_new != repack_current_segment)
 			{
@@ -2673,7 +2667,7 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 			 * that far.
 			 */
 			priv = (ReadLocalXLogPageNoWaitPrivate *)
-				decoding_ctx->reader->private_data;
+				ctx->reader->private_data;
 			if (priv->end_of_wal)
 				priv->end_of_wal = false;
 			else
@@ -2694,7 +2688,7 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 			SpinLockRelease(&shared->mutex);
 		}
 		if (!XLogRecPtrIsInvalid(lsn_upto) &&
-			decoding_ctx->reader->EndRecPtr >= lsn_upto)
+			ctx->reader->EndRecPtr >= lsn_upto)
 			break;
 
 		if (record == NULL)
@@ -2720,7 +2714,7 @@ decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 	{
 		Snapshot	snapshot;
 
-		snapshot = SnapBuildSnapshotForRepack(decoding_ctx->snapshot_builder);
+		snapshot = SnapBuildSnapshotForRepack(ctx->snapshot_builder);
 		export_snapshot(snapshot, shared);
 		/*
 		 * Adjust the replication slot's xmin so that VACUUM can do more work.
