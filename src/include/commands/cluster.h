@@ -16,10 +16,12 @@
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
+#include "postmaster/bgworker.h"
 #include "replication/logical.h"
 #include "storage/buffile.h"
 #include "storage/lock.h"
 #include "storage/relfilelocator.h"
+#include "storage/shm_mq.h"
 #include "utils/relcache.h"
 #include "utils/resowner.h"
 #include "utils/tuplestore.h"
@@ -47,6 +49,63 @@ typedef struct ClusterParams
 
 extern RelFileLocator repacked_rel_locator;
 extern RelFileLocator repacked_rel_toast_locator;
+extern PGDLLIMPORT int repack_blocks_per_snapshot;
+
+/*
+ * Everything we need to call ExecInsertIndexTuples().
+ */
+typedef struct IndexInsertState
+{
+	ResultRelInfo *rri;
+	EState	   *estate;
+} IndexInsertState;
+
+/*
+ * Backend-local information to control the decoding worker.
+ */
+typedef struct DecodingWorker
+{
+	/* The worker. */
+	BackgroundWorkerHandle *handle;
+
+	/* DecodingWorkerShared is in this segment. */
+	dsm_segment *seg;
+
+	/* Handle of the error queue. */
+	shm_mq_handle *error_mqh;
+} DecodingWorker;
+
+/*
+ * Information needed to handle concurrent data changes.
+ */
+typedef struct ConcurrentChangeContext
+{
+	/* The relation the changes are applied to. */
+	Relation	rel;
+
+	/*
+	 * Background worker performing logical decoding of concurrent data
+	 * changes.
+	 */
+	DecodingWorker	*worker;
+
+	/*
+	 * The following is needed to find the existing tuple if the change is
+	 * UPDATE or DELETE. 'ident_key' should have all the fields except for
+	 * 'sk_argument' initialized.
+	 */
+	Relation	ident_index;
+	ScanKey		ident_key;
+	int			ident_key_nentries;
+
+	/* Needed to update indexes of rel_dst. */
+	IndexInsertState *iistate;
+
+	/* The first block of the scan used to copy the heap. */
+	BlockNumber		first_block;
+	/* List of RepackApplyRange objects. */
+	List	*block_ranges;
+} ConcurrentChangeContext;
 
 /*
  * Stored as a single byte in the output file.
@@ -102,6 +161,12 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 TransactionId frozenXid,
 							 MultiXactId cutoffMulti,
 							 char newrelpersistence);
+extern void repack_get_concurrent_changes(struct ConcurrentChangeContext *ctx,
+										  XLogRecPtr end_of_wal,
+										  BlockNumber range_end,
+										  bool request_snapshot,
+										  bool done);
+extern Snapshot repack_get_snapshot(struct ConcurrentChangeContext *ctx);
 
 extern void RepackWorkerMain(Datum main_arg);
 #endif							/* CLUSTER_H */

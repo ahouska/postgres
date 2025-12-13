@@ -94,38 +94,27 @@ typedef struct
 RelFileLocator repacked_rel_locator = {.relNumber = InvalidOid};
 RelFileLocator repacked_rel_toast_locator = {.relNumber = InvalidOid};
 
-/*
- * Everything we need to call ExecInsertIndexTuples().
- */
-typedef struct IndexInsertState
-{
-	ResultRelInfo *rri;
-	EState	   *estate;
-} IndexInsertState;
-
 /* The WAL segment being decoded. */
 static XLogSegNo repack_current_segment = 0;
 
 /*
- * Information needed to apply concurrent data changes.
+ * When REPACK (CONCURRENTLY) copies data to the new heap, a new snapshot is
+ * built after processing this many pages.
  */
-typedef struct ChangeDest
+int repack_blocks_per_snapshot = 1024;
+
+/*
+ * Remember here to which pages should applied to changes recorded in given
+ * file.
+ */
+typedef struct RepackApplyRange
 {
-	/* The relation the changes are applied to. */
-	Relation	rel;
+	/* The first block of the next range. */
+	BlockNumber		end;
 
-	/*
-	 * The following is needed to find the existing tuple if the change is
-	 * UPDATE or DELETE. 'ident_key' should have all the fields except for
-	 * 'sk_argument' initialized.
-	 */
-	Relation	ident_index;
-	ScanKey		ident_key;
-	int			ident_key_nentries;
-
-	/* Needed to update indexes of rel_dst. */
-	IndexInsertState *iistate;
-} ChangeDest;
+	/* File containing the changes to be applied to blocks in this range. */
+	char	*fname;
+} RepackApplyRange;
 
 /*
  * Layout of shared memory used for communication between backend and the
@@ -133,6 +122,12 @@ typedef struct ChangeDest
  */
 typedef struct DecodingWorkerShared
 {
+	/* Is the decoding initialized? */
+	bool	initialized;
+
+	/* Set to request a snapshot. */
+	bool	snapshot_requested;
+
 	/*
 	 * Once the worker has reached this LSN, it should close the current
 	 * output file and either create a new one or exit, according to the field
@@ -140,8 +135,15 @@ typedef struct DecodingWorkerShared
 	 * the WAL available and keep checking this field. It is ok if the worker
 	 * had already decoded records whose LSN is >= lsn_upto before this field
 	 * has been set.
+	 *
+	 * Set a valid LSN to request data changes.
 	 */
 	XLogRecPtr	lsn_upto;
+
+#define	WORKER_RESPONSE_SNAPSHOT	0x1
+#define	WORKER_RESPONSE_CHANGES		0x2
+	/* Which kind of data is ready? */
+	int		response;;
 
 	/* Exit after closing the current file? */
 	bool		done;
@@ -149,11 +151,9 @@ typedef struct DecodingWorkerShared
 	/* The output is stored here. */
 	SharedFileSet sfs;
 
-	/* Can backend read the file contents? */
-	bool		sfs_valid;
-
 	/* Number of the last file exported by the worker. */
-	int			last_exported;
+	int			last_exported_changes;
+	int			last_exported_snapshot;
 
 	/* Synchronize access to the fields above. */
 	slock_t		mutex;
@@ -189,31 +189,19 @@ typedef struct DecodingWorkerShared
 } DecodingWorkerShared;
 
 /*
- * Generate output file name. If relations of the same 'relid' happen to be
- * processed at the same time, they must be from different databases and
+ * Generate worker's output file name. If relations of the same 'relid' happen
+ * to be processed at the same time, they must be from different databases and
  * therefore different backends must be involved. (PID is already present in
  * the fileset name.)
  */
 static inline void
-DecodingWorkerFileName(char *fname, Oid relid, uint32 seq)
+DecodingWorkerFileName(char *fname, Oid relid, uint32 seq, bool snapshot)
 {
-	snprintf(fname, MAXPGPATH, "%u-%u", relid, seq);
+	if (!snapshot)
+		snprintf(fname, MAXPGPATH, "%u-%u", relid, seq);
+	else
+		snprintf(fname, MAXPGPATH, "%u-%u-snapshot", relid, seq);
 }
-
-/*
- * Backend-local information to control the decoding worker.
- */
-typedef struct DecodingWorker
-{
-	/* The worker. */
-	BackgroundWorkerHandle *handle;
-
-	/* DecodingWorkerShared is in this segment. */
-	dsm_segment *seg;
-
-	/* Handle of the error queue. */
-	shm_mq_handle *error_mqh;
-} DecodingWorker;
 
 /* Pointer to currently running decoding worker. */
 static DecodingWorker *decoding_worker = NULL;
@@ -231,11 +219,11 @@ static void check_repack_concurrently_requirements(Relation rel);
 static void rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							 bool concurrent);
 static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-							Snapshot snapshot,
 							bool verbose,
 							bool *pSwapToastByContent,
 							TransactionId *pFreezeXid,
-							MultiXactId *pCutoffMulti);
+							MultiXactId *pCutoffMulti,
+							ConcurrentChangeContext *ctx);
 static List *get_tables_to_repack(RepackCommand cmd, bool usingindex,
 								  MemoryContext permcxt);
 static List *get_tables_to_repack_partitioned(RepackCommand cmd,
@@ -245,9 +233,12 @@ static bool cluster_is_permitted_for_relation(RepackCommand cmd,
 											  Oid relid, Oid userid);
 
 static LogicalDecodingContext *setup_logical_decoding(Oid relid);
-static bool decode_concurrent_changes(LogicalDecodingContext *ctx,
+static bool decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 									  DecodingWorkerShared *shared);
-static void apply_concurrent_changes(BufFile *file, ChangeDest *dest);
+static void apply_concurrent_changes(ConcurrentChangeContext *ctx);
+static void apply_concurrent_changes_file(ConcurrentChangeContext *ctx,
+										  BufFile *file,
+										  BlockNumber range_end);
 static void apply_concurrent_insert(Relation rel, HeapTuple tup,
 									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
@@ -256,12 +247,14 @@ static void apply_concurrent_update(Relation rel, HeapTuple tup,
 									IndexInsertState *iistate,
 									TupleTableSlot *index_slot);
 static void apply_concurrent_delete(Relation rel, HeapTuple tup_target);
-static HeapTuple find_target_tuple(Relation rel, ChangeDest *dest,
+static bool is_tuple_in_block_range(HeapTuple tup, BlockNumber start,
+									BlockNumber end);
+static HeapTuple find_target_tuple(Relation rel,
+								   ConcurrentChangeContext *ctx,
 								   HeapTuple tup_key,
 								   TupleTableSlot *ident_slot);
-static void process_concurrent_changes(XLogRecPtr end_of_wal,
-									   ChangeDest *dest,
-									   bool done);
+static void repack_add_block_range(ConcurrentChangeContext *ctx,
+								   BlockNumber end, char *fname);
 static IndexInsertState *get_index_insert_state(Relation relation,
 												Oid ident_index_id,
 												Relation *ident_index_p);
@@ -272,7 +265,8 @@ static void cleanup_logical_decoding(LogicalDecodingContext *ctx);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 											   Relation cl_index,
 											   TransactionId frozenXid,
-											   MultiXactId cutoffMulti);
+											   MultiXactId cutoffMulti,
+											   ConcurrentChangeContext *ctx);
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
 static Relation process_single_relation(RepackStmt *stmt,
 										LOCKMODE lockmode,
@@ -283,9 +277,8 @@ static Oid	determine_clustered_index(Relation rel, bool usingindex,
 static void start_decoding_worker(Oid relid);
 static void stop_decoding_worker(void);
 static void repack_worker_internal(dsm_segment *seg);
-static void export_initial_snapshot(Snapshot snapshot,
+static void export_snapshot(Snapshot snapshot,
 									DecodingWorkerShared *shared);
-static Snapshot get_initial_snapshot(DecodingWorker *worker);
 static void ProcessRepackMessage(StringInfo msg);
 static const char *RepackCommandAsString(RepackCommand cmd);
 
@@ -989,6 +982,15 @@ check_repack_concurrently_requirements(Relation rel)
 						RelationGetRelationName(rel)),
 				 (errhint("Relation \"%s\" has no identity index.",
 						  RelationGetRelationName(rel)))));
+
+	/*
+	 * In the CONCURRENTLY mode we don't want to use the same snapshot
+	 * throughout the whole processing, as it could block the progress of xmin
+	 * horizon.
+	 */
+	if (IsolationUsesXactSnapshot())
+		ereport(ERROR,
+				(errmsg("REPACK (CONCURRENTLY) does not support transaction isolation higher than READ COMMITTED")));
 }
 
 
@@ -1019,7 +1021,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	bool		swap_toast_by_content;
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
-	Snapshot	snapshot = NULL;
+	ConcurrentChangeContext		*ctx = NULL;
 #if USE_ASSERT_CHECKING
 	LOCKMODE	lmode;
 
@@ -1031,6 +1033,13 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 
 	if (concurrent)
 	{
+		/*
+		 * This is only needed here to gather the data changes and range
+		 * information during the copying. The fields needed to apply the
+		 * changes be filled later.
+		 */
+		ctx = palloc0_object(ConcurrentChangeContext);
+
 		/*
 		 * The worker needs to be member of the locking group we're the leader
 		 * of. We ought to become the leader before the worker starts. The
@@ -1056,13 +1065,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 * REPACK CONCURRENTLY.
 		 */
 		start_decoding_worker(tableOid);
-
-		/*
-		 * Wait until the worker has the initial snapshot and retrieve it.
-		 */
-		snapshot = get_initial_snapshot(decoding_worker);
-
-		PushActiveSnapshot(snapshot);
+		ctx->worker = decoding_worker;
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -1086,22 +1089,16 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	NewHeap = table_open(OIDNewHeap, NoLock);
 
 	/* Copy the heap data into the new table in the desired order */
-	copy_table_data(NewHeap, OldHeap, index, snapshot, verbose,
-					&swap_toast_by_content, &frozenXid, &cutoffMulti);
-
-	/* The historic snapshot won't be needed anymore. */
-	if (snapshot)
-		PopActiveSnapshot();
+	if (concurrent)
+	{
+		ctx->first_block = InvalidBlockNumber;
+		ctx->block_ranges = NIL;
+	}
+	copy_table_data(NewHeap, OldHeap, index, verbose, &swap_toast_by_content,
+					&frozenXid, &cutoffMulti, ctx);
 
 	if (concurrent)
 	{
-		/*
-		 * Push a snapshot that we will use to find old versions of rows when
-		 * processing concurrent UPDATE and DELETE commands. (That snapshot
-		 * should also be used by index expressions.)
-		 */
-		PushActiveSnapshot(GetTransactionSnapshot());
-
 		/*
 		 * Make sure we can find the tuples just inserted when applying DML
 		 * commands on top of those.
@@ -1110,8 +1107,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 
 		Assert(!swap_toast_by_content);
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
-										   frozenXid, cutoffMulti);
-		PopActiveSnapshot();
+										   frozenXid, cutoffMulti, ctx);
 
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_FINAL_CLEANUP);
@@ -1275,9 +1271,6 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
 /*
  * Do the physical copying of table data.
  *
- * 'snapshot' and 'decoding_ctx': see table_relation_copy_for_cluster(). Pass
- * iff concurrent processing is required.
- *
  * There are three output parameters:
  * *pSwapToastByContent is set true if toast tables must be swapped by content.
  * *pFreezeXid receives the TransactionId used as freeze cutoff point.
@@ -1285,8 +1278,9 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace, Oid NewAccessMethod,
  */
 static void
 copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
-				Snapshot snapshot, bool verbose, bool *pSwapToastByContent,
-				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti)
+				bool verbose, bool *pSwapToastByContent,
+				TransactionId *pFreezeXid, MultiXactId *pCutoffMulti,
+				ConcurrentChangeContext *ctx)
 {
 	Relation	relRelation;
 	HeapTuple	reltup;
@@ -1303,7 +1297,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
-	bool		concurrent = snapshot != NULL;
+	bool		concurrent = ctx != NULL;
 	LOCKMODE	lmode;
 
 	lmode = concurrent ? ShareUpdateExclusiveLock : AccessExclusiveLock;
@@ -1415,8 +1409,17 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * provided, else plain seqscan.
 	 */
 	if (OldIndex != NULL && OldIndex->rd_rel->relam == BTREE_AM_OID)
-		use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
-										 RelationGetRelid(OldIndex));
+	{
+		if (!concurrent)
+			use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
+											 RelationGetRelid(OldIndex));
+		else
+			/*
+			 * To use multiple snapshots, we need to process the table
+			 * sequentially.
+			 */
+			use_sort = true;
+	}
 	else
 		use_sort = false;
 
@@ -1445,11 +1448,11 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * values (e.g. because the AM doesn't use freezing).
 	 */
 	table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
-									cutoffs.OldestXmin, snapshot,
+									cutoffs.OldestXmin,
 									&cutoffs.FreezeLimit,
 									&cutoffs.MultiXactCutoff,
 									&num_tuples, &tups_vacuumed,
-									&tups_recently_dead);
+									&tups_recently_dead, ctx);
 
 	/* return selected values to caller, get set as relfrozenxid/minmxid */
 	*pFreezeXid = cutoffs.FreezeLimit;
@@ -2598,26 +2601,30 @@ setup_logical_decoding(Oid relid)
  * If true is returned, there is no more work for the worker.
  */
 static bool
-decode_concurrent_changes(LogicalDecodingContext *ctx,
+decode_concurrent_changes(LogicalDecodingContext *decoding_ctx,
 						  DecodingWorkerShared *shared)
 {
 	RepackDecodingState *dstate;
+	bool		snapshot_requested;
 	XLogRecPtr	lsn_upto;
 	bool		done;
 	char		fname[MAXPGPATH];
 
-	dstate = (RepackDecodingState *) ctx->output_writer_private;
+	dstate = (RepackDecodingState *) decoding_ctx->output_writer_private;
 
 	/* Open the output file. */
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_changes + 1,
+						   false);
 	dstate->file = BufFileCreateFileSet(&shared->sfs.fs, fname);
 
 	SpinLockAcquire(&shared->mutex);
 	lsn_upto = shared->lsn_upto;
+	snapshot_requested = shared->snapshot_requested;
 	done = shared->done;
 	SpinLockRelease(&shared->mutex);
 
-	while (XLogRecPtrIsInvalid(lsn_upto) || ctx->reader->EndRecPtr < lsn_upto)
+	while (true)
 	{
 		XLogRecord *record;
 		XLogSegNo	segno_new;
@@ -2626,8 +2633,31 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 
 		CHECK_FOR_INTERRUPTS();
 
-		record = XLogReadRecord(ctx->reader, &errm);
-		if (record == NULL)
+		record = XLogReadRecord(decoding_ctx->reader, &errm);
+		if (record)
+		{
+			LogicalDecodingProcessRecord(decoding_ctx, decoding_ctx->reader);
+
+			/*
+			 * If WAL segment boundary has been crossed, inform the decoding
+			 * system that the catalog_xmin can advance.
+			 *
+			 * TODO Does it make sense to confirm more often? Segment size
+			 * seems appropriate for restart_lsn (because less than a segment
+			 * cannot be recycled anyway), however more frequent checks might
+			 * be beneficial for catalog_xmin.
+			 */
+			end_lsn = decoding_ctx->reader->EndRecPtr;
+			XLByteToSeg(end_lsn, segno_new, wal_segment_size);
+			if (segno_new != repack_current_segment)
+			{
+				LogicalConfirmReceivedLocation(end_lsn);
+				elog(DEBUG1, "REPACK: confirmed receive location %X/%X",
+					 (uint32) (end_lsn >> 32), (uint32) end_lsn);
+				repack_current_segment = segno_new;
+			}
+		}
+		else
 		{
 			ReadLocalXLogPageNoWaitPrivate *priv;
 
@@ -2643,95 +2673,144 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			 * that far.
 			 */
 			priv = (ReadLocalXLogPageNoWaitPrivate *)
-				ctx->reader->private_data;
+				decoding_ctx->reader->private_data;
 			if (priv->end_of_wal)
-			{
 				priv->end_of_wal = false;
-
-				/* Do we know how far we should get? */
-				if (XLogRecPtrIsInvalid(lsn_upto))
-				{
-					SpinLockAcquire(&shared->mutex);
-					lsn_upto = shared->lsn_upto;
-					/* 'done' should be set at the same time as 'lsn_upto' */
-					done = shared->done;
-					SpinLockRelease(&shared->mutex);
-
-					/* Check if the work happens to be complete. */
-					continue;
-				}
-
-				/* Wait a bit before we retry reading WAL. */
-				(void) WaitLatch(MyLatch,
-								 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-								 1000L,
-								 WAIT_EVENT_REPACK_WORKER_MAIN);
-
-				continue;
-			}
 			else
 				ereport(ERROR, (errmsg("could not read WAL record")));
 		}
 
-		LogicalDecodingProcessRecord(ctx, ctx->reader);
-
 		/*
-		 * If WAL segment boundary has been crossed, inform the decoding
-		 * system that the catalog_xmin can advance.
-		 *
-		 * TODO Does it make sense to confirm more often? Segment size seems
-		 * appropriate for restart_lsn (because less than a segment cannot be
-		 * recycled anyway), however more frequent checks might be beneficial
-		 * for catalog_xmin.
+		 * Whether we could read new record or not, keep checking if
+		 * 'lsn_upto' was specified.
 		 */
-		end_lsn = ctx->reader->EndRecPtr;
-		XLByteToSeg(end_lsn, segno_new, wal_segment_size);
-		if (segno_new != repack_current_segment)
-		{
-			LogicalConfirmReceivedLocation(end_lsn);
-			elog(DEBUG1, "REPACK: confirmed receive location %X/%X",
-				 (uint32) (end_lsn >> 32), (uint32) end_lsn);
-			repack_current_segment = segno_new;
-		}
-
-		/* Keep checking if 'lsn_upto' was specified. */
 		if (XLogRecPtrIsInvalid(lsn_upto))
 		{
 			SpinLockAcquire(&shared->mutex);
 			lsn_upto = shared->lsn_upto;
+			snapshot_requested = shared->snapshot_requested;
 			/* 'done' should be set at the same time as 'lsn_upto' */
 			done = shared->done;
 			SpinLockRelease(&shared->mutex);
 		}
+		if (!XLogRecPtrIsInvalid(lsn_upto) &&
+			decoding_ctx->reader->EndRecPtr >= lsn_upto)
+			break;
+
+		if (record == NULL)
+			/* Wait a bit before we retry reading WAL. */
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 100000L, /* XXX Tune the delay. */
+							 WAIT_EVENT_REPACK_WORKER_MAIN);
 	}
 
 	/*
-	 * Close the file and make it available to the backend.
+	 * Close the file so we can make it available to the backend.
 	 */
 	BufFileClose(dstate->file);
 	dstate->file = NULL;
+
+	/*
+	 * Before publishing the data changes, export the snapshot too if
+	 * requested. Publishing both at once makes sense because both are needed
+	 * at the same time, and it's simpler.
+	 */
+	if (snapshot_requested)
+	{
+		Snapshot	snapshot;
+
+		snapshot = SnapBuildSnapshotForRepack(decoding_ctx->snapshot_builder);
+		export_snapshot(snapshot, shared);
+		/*
+		 * Adjust the replication slot's xmin so that VACUUM can do more work.
+		 */
+		LogicalIncreaseXminForSlot(InvalidXLogRecPtr, snapshot->xmin, false);
+		FreeSnapshot(snapshot);
+	}
+	else
+	{
+		/*
+		 * If data changes were requested but no following snapshot, we don't
+		 * care about xmin horizon because the heap copying should be done by
+		 * now.
+		 */
+		LogicalIncreaseXminForSlot(InvalidXLogRecPtr, InvalidTransactionId,
+								   false);
+
+	}
+
+	/* Now announce that the output is available. */
 	SpinLockAcquire(&shared->mutex);
 	shared->lsn_upto = InvalidXLogRecPtr;
-	shared->sfs_valid = true;
-	shared->last_exported++;
+	shared->response |= WORKER_RESPONSE_CHANGES;
+	shared->last_exported_changes++;
+	if (snapshot_requested)
+	{
+		shared->snapshot_requested = false;
+		shared->response |= WORKER_RESPONSE_SNAPSHOT;
+		shared->last_exported_snapshot++;
+	}
 	SpinLockRelease(&shared->mutex);
+
 	ConditionVariableSignal(&shared->cv);
 
 	return done;
 }
 
 /*
- * Apply changes stored in 'file'.
+ * Apply all concurrent changes.
  */
 static void
-apply_concurrent_changes(BufFile *file, ChangeDest *dest)
+apply_concurrent_changes(ConcurrentChangeContext *ctx)
+{
+	DecodingWorkerShared *shared;
+	ListCell	*lc;
+
+	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
+
+	foreach(lc, ctx->block_ranges)
+	{
+		RepackApplyRange	*range;
+		BufFile *file;
+
+		range = (RepackApplyRange *) lfirst(lc);
+
+		file = BufFileOpenFileSet(&shared->sfs.fs, range->fname, O_RDONLY,
+								  false);
+
+		/*
+		 * If range end is valid, the start should be as well.
+		 */
+		Assert(!BlockNumberIsValid(range->end) ||
+			   BlockNumberIsValid(ctx->first_block));
+
+		apply_concurrent_changes_file(ctx, file, range->end);
+		BufFileClose(file);
+
+		pfree(range->fname);
+		pfree(range);
+	}
+
+	/* Get ready for the next decoding. */
+	ctx->block_ranges = NIL;
+	ctx->first_block = InvalidBlockNumber;
+}
+
+/*
+ * Apply concurrent changes stored in 'file'.
+ */
+static void
+apply_concurrent_changes_file(ConcurrentChangeContext *ctx, BufFile *file,
+							  BlockNumber range_end)
 {
 	char		kind;
 	uint32		t_len;
-	Relation	rel = dest->rel;
+	Relation	rel = ctx->rel;
 	TupleTableSlot *index_slot,
 			   *ident_slot;
 	HeapTuple	tup_old = NULL;
+	bool	check_range = BlockNumberIsValid(range_end);
 
 	/* TupleTableSlot is needed to pass the tuple to ExecInsertIndexTuples(). */
 	index_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
@@ -2759,8 +2838,8 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 		tup->t_data = (HeapTupleHeader) ((char *) tup + HEAPTUPLESIZE);
 		BufFileReadExact(file, tup->t_data, t_len);
 		tup->t_len = t_len;
-		ItemPointerSetInvalid(&tup->t_self);
-		tup->t_tableOid = RelationGetRelid(dest->rel);
+		tup->t_tableOid = RelationGetRelid(ctx->rel);
+		BufFileReadExact(file, &tup->t_self, sizeof(tup->t_self));
 
 		if (kind == CHANGE_UPDATE_OLD)
 		{
@@ -2771,7 +2850,10 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 		{
 			Assert(tup_old == NULL);
 
-			apply_concurrent_insert(rel, tup, dest->iistate, index_slot);
+			if (!check_range ||
+				is_tuple_in_block_range(tup, ctx->first_block, range_end))
+				apply_concurrent_insert(rel, tup, ctx->iistate,
+										index_slot);
 
 			pfree(tup);
 		}
@@ -2792,16 +2874,51 @@ apply_concurrent_changes(BufFile *file, ChangeDest *dest)
 			/*
 			 * Find the tuple to be updated or deleted.
 			 */
-			tup_exist = find_target_tuple(rel, dest, tup_key, ident_slot);
-			if (tup_exist == NULL)
-				elog(ERROR, "failed to find target tuple");
+			if (!check_range||
+				(is_tuple_in_block_range(tup_key, ctx->first_block,
+										 range_end)))
+			{
+				/* The change needs to be applied to this tuple. */
+				tup_exist = find_target_tuple(rel, ctx, tup_key, ident_slot);
+				if (tup_exist == NULL)
+					elog(ERROR, "failed to find target tuple");
 
-			if (kind == CHANGE_UPDATE_NEW)
-				apply_concurrent_update(rel, tup, tup_exist, dest->iistate,
-										index_slot);
+				if (kind == CHANGE_DELETE)
+					apply_concurrent_delete(rel, tup_exist);
+				else
+				{
+					/* UPDATE */
+					if (!check_range || tup == tup_key ||
+						is_tuple_in_block_range(tup, ctx->first_block,
+												range_end))
+						/* The new tuple is in the same range. */
+						apply_concurrent_update(rel, tup, tup_exist,
+												ctx->iistate, index_slot);
+					else
+						/*
+						 * The new key is in the other range, so only delete
+						 * it from the current one. The new version should be
+						 * visible to the snapshot that we'll use to copy the
+						 * other block.
+						 */
+						apply_concurrent_delete(rel, tup_exist);
+				}
+			}
 			else
-				apply_concurrent_delete(rel, tup_exist);
-
+			{
+				/*
+				 * The change belongs to another range, so we don't need to
+				 * bother with the old tuple: the snapshot used for the other
+				 * range won't see it, so it won't be copied. However, the new
+				 * tuple still may need to go to the range we are checking. In
+				 * that case, simply insert it there.
+				 */
+				if (kind == CHANGE_UPDATE_NEW && tup != tup_key &&
+					is_tuple_in_block_range(tup, ctx->first_block,
+											range_end))
+					apply_concurrent_insert(rel, tup, ctx->iistate,
+											index_slot);
+			}
 			if (tup_old != NULL)
 			{
 				pfree(tup_old);
@@ -2941,6 +3058,33 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target)
 }
 
 /*
+ * Check if tuple originates from given range of blocks that have already been
+ * copied.
+ */
+static bool
+is_tuple_in_block_range(HeapTuple tup, BlockNumber start, BlockNumber end)
+{
+	BlockNumber	blknum;
+
+	Assert(BlockNumberIsValid(start) && BlockNumberIsValid(end));
+
+	blknum = ItemPointerGetBlockNumber(&tup->t_self);
+	Assert(BlockNumberIsValid(blknum));
+
+	if (start < end)
+	{
+		return blknum >= start && blknum < end;
+	}
+	else
+	{
+		/* Has the scan position wrapped around? */
+		Assert(start > end);
+
+		return blknum >= start || blknum < end;
+	}
+}
+
+/*
  * Find the tuple to be updated or deleted.
  *
  * 'tup_key' is a tuple containing the key values for the scan.
@@ -2949,10 +3093,10 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target)
  * it when he no longer needs the tuple returned.
  */
 static HeapTuple
-find_target_tuple(Relation rel, ChangeDest *dest, HeapTuple tup_key,
-				  TupleTableSlot *ident_slot)
+find_target_tuple(Relation rel, ConcurrentChangeContext *ctx,
+				  HeapTuple tup_key, TupleTableSlot *ident_slot)
 {
-	Relation	ident_index = dest->ident_index;
+	Relation	ident_index = ctx->ident_index;
 	IndexScanDesc scan;
 	Form_pg_index ident_form;
 	int2vector *ident_indkey;
@@ -2960,14 +3104,14 @@ find_target_tuple(Relation rel, ChangeDest *dest, HeapTuple tup_key,
 
 	/* XXX no instrumentation for now */
 	scan = index_beginscan(rel, ident_index, GetActiveSnapshot(),
-						   NULL, dest->ident_key_nentries, 0);
+						   NULL, ctx->ident_key_nentries, 0);
 
 	/*
 	 * Scan key is passed by caller, so it does not have to be constructed
 	 * multiple times. Key entries have all fields initialized, except for
 	 * sk_argument.
 	 */
-	index_rescan(scan, dest->ident_key, dest->ident_key_nentries, NULL, 0);
+	index_rescan(scan, ctx->ident_key, ctx->ident_key_nentries, NULL, 0);
 
 	/* Info needed to retrieve key values from heap tuple. */
 	ident_form = ident_index->rd_index;
@@ -3002,15 +3146,22 @@ find_target_tuple(Relation rel, ChangeDest *dest, HeapTuple tup_key,
 }
 
 /*
- * Decode and apply concurrent changes, up to (and including) the record whose
- * LSN is 'end_of_wal'.
+ * Get concurrent changes, up to (and including) the record whose LSN is
+ * 'end_of_wal', from the decoding worker. If 'range_end' is a valid block
+ * number, the changes should only be applied to blocks greater than or equal
+ * to ctx->first_block and lower than range_end.
+ *
+ * If 'request_snapshot' is true, the snapshot built at LSN following the last
+ * data change needs to be exported too.
  */
-static void
-process_concurrent_changes(XLogRecPtr end_of_wal, ChangeDest *dest, bool done)
+extern void
+repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
+							  XLogRecPtr end_of_wal,
+							  BlockNumber range_end,
+							  bool request_snapshot, bool done)
 {
 	DecodingWorkerShared *shared;
 	char		fname[MAXPGPATH];
-	BufFile    *file;
 
 	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 								 PROGRESS_REPACK_PHASE_CATCH_UP);
@@ -3019,6 +3170,8 @@ process_concurrent_changes(XLogRecPtr end_of_wal, ChangeDest *dest, bool done)
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 	SpinLockAcquire(&shared->mutex);
 	shared->lsn_upto = end_of_wal;
+	Assert(!shared->snapshot_requested);
+	shared->snapshot_requested = request_snapshot;
 	shared->done = done;
 	SpinLockRelease(&shared->mutex);
 
@@ -3030,31 +3183,48 @@ process_concurrent_changes(XLogRecPtr end_of_wal, ChangeDest *dest, bool done)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		bool		valid;
+		int	response;
 
 		SpinLockAcquire(&shared->mutex);
-		valid = shared->sfs_valid;
+		response = shared->response;
 		SpinLockRelease(&shared->mutex);
 
-		if (valid)
+		if (response & WORKER_RESPONSE_CHANGES)
 			break;
 
 		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
 	}
 	ConditionVariableCancelSleep();
 
-	/* Open the file. */
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported);
-	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
-	apply_concurrent_changes(file, dest);
+	/*
+	 * Remember the file name so we can apply the changes when
+	 * appropriate. One particular reason to postpone the replay is that
+	 * indexes haven't been built yet on the new heap.
+	 */
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_changes,
+						   false);
+	repack_add_block_range(ctx, range_end, fname);
 
 	/* No file is exported until the worker exports the next one. */
 	SpinLockAcquire(&shared->mutex);
-	shared->sfs_valid = false;
+	shared->response &= ~WORKER_RESPONSE_CHANGES;
+	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
 	SpinLockRelease(&shared->mutex);
-
-	BufFileClose(file);
 }
+
+static void
+repack_add_block_range(ConcurrentChangeContext *ctx, BlockNumber end,
+					   char *fname)
+{
+	RepackApplyRange	*range;
+
+	range = palloc_object(RepackApplyRange);
+	range->end = end;
+	range->fname = pstrdup(fname);
+	ctx->block_ranges = lappend(ctx->block_ranges, range);
+}
+
 
 /*
  * Initialize IndexInsertState for index specified by ident_index_id.
@@ -3198,7 +3368,8 @@ static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 								   Relation cl_index,
 								   TransactionId frozenXid,
-								   MultiXactId cutoffMulti)
+								   MultiXactId cutoffMulti,
+								   ConcurrentChangeContext *ctx)
 {
 	LOCKMODE	lockmode_old PG_USED_FOR_ASSERTS_ONLY;
 	List	   *ind_oids_new;
@@ -3217,7 +3388,6 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	Relation   *ind_refs,
 			   *ind_refs_p;
 	int			nind;
-	ChangeDest	chgdst;
 
 	/* Like in cluster_rel(). */
 	lockmode_old = ShareUpdateExclusiveLock;
@@ -3273,11 +3443,18 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 				(errmsg("identity index missing on the new relation")));
 
 	/* Gather information to apply concurrent changes. */
-	chgdst.rel = NewHeap;
-	chgdst.iistate = get_index_insert_state(NewHeap, ident_idx_new,
-											&chgdst.ident_index);
-	chgdst.ident_key = build_identity_key(ident_idx_new, OldHeap,
-										  &chgdst.ident_key_nentries);
+	ctx->rel = NewHeap;
+	ctx->iistate = get_index_insert_state(NewHeap, ident_idx_new,
+										  &ctx->ident_index);
+	ctx->ident_key = build_identity_key(ident_idx_new, OldHeap,
+										&ctx->ident_key_nentries);
+
+	/*
+	 * Replay the concurrent data changes gathered during heap copying. This
+	 * had to wait until after the index build because the identity index is
+	 * needed to apply UPDATE and DELETE changes.
+	 */
+	apply_concurrent_changes(ctx);
 
 	/*
 	 * During testing, wait for another backend to perform concurrent data
@@ -3295,11 +3472,13 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	end_of_wal = GetFlushRecPtr(NULL);
 
 	/*
-	 * Apply concurrent changes first time, to minimize the time we need to
-	 * hold AccessExclusiveLock. (Quite some amount of WAL could have been
+	 * Decode and apply concurrent changes again, to minimize the time we need
+	 * to hold AccessExclusiveLock. (Quite some amount of WAL could have been
 	 * written during the data copying and index creation.)
 	 */
-	process_concurrent_changes(end_of_wal, &chgdst, false);
+	repack_get_concurrent_changes(ctx, end_of_wal, InvalidBlockNumber, false,
+								  false);
+	apply_concurrent_changes(ctx);
 
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
@@ -3396,10 +3575,13 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	end_of_wal = GetFlushRecPtr(NULL);
 
 	/*
-	 * Apply the concurrent changes again. Indicate that the decoding worker
-	 * won't be needed anymore.
+	 * Decode and apply the concurrent changes again. Indicate that the
+	 * decoding worker won't be needed anymore.
 	 */
-	process_concurrent_changes(end_of_wal, &chgdst, true);
+	repack_get_concurrent_changes(ctx, end_of_wal, InvalidBlockNumber, false,
+								  true);
+	apply_concurrent_changes(ctx);
+
 
 	/* Remember info about rel before closing OldHeap */
 	relpersistence = OldHeap->rd_rel->relpersistence;
@@ -3450,8 +3632,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	table_close(NewHeap, NoLock);
 
 	/* Cleanup what we don't need anymore. (And close the identity index.) */
-	pfree(chgdst.ident_key);
-	free_index_insert_state(chgdst.iistate);
+	pfree(ctx->ident_key);
+	free_index_insert_state(ctx->iistate);
 
 	/*
 	 * Swap the relations and their TOAST relations and TOAST indexes. This
@@ -3494,6 +3676,23 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		char	   *newName;
 		Relation	ind;
 
+		/*
+		 * Try to reduce the impact on VACUUM.
+		 *
+		 * The individual builds might still be a problem, but that's a
+		 * separate issue.
+		 *
+		 * TODO Can we somehow use the fact that the new heap is not yet
+		 * visible to other transaction, and thus cannot be vacuumed? Perhaps
+		 * by preventing snapshots from setting MyProc->xmin temporarily. (All
+		 * the snapshots that might have participated in the build, including
+		 * the catalog snapshots, must not be used for other tables of
+		 * course.)
+		 */
+		PopActiveSnapshot();
+		InvalidateCatalogSnapshot();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
 		ind_oid = lfirst_oid(lc);
 		ind = index_open(ind_oid, ShareUpdateExclusiveLock);
 
@@ -3533,11 +3732,15 @@ start_decoding_worker(Oid relid)
 		BUFFERALIGN(REPACK_ERROR_QUEUE_SIZE);
 	seg = dsm_create(size, 0);
 	shared = (DecodingWorkerShared *) dsm_segment_address(seg);
+	shared->initialized = false;
 	shared->lsn_upto = InvalidXLogRecPtr;
 	shared->done = false;
+	/* Snapshot is the first thing we need from the worker. */
+	shared->snapshot_requested = true;
+	shared->response = 0;
 	SharedFileSetInit(&shared->sfs, seg);
-	shared->sfs_valid = false;
-	shared->last_exported = -1;
+	shared->last_exported_changes = -1;
+	shared->last_exported_snapshot = -1;
 	SpinLockInit(&shared->mutex);
 	shared->dbid = MyDatabaseId;
 
@@ -3580,6 +3783,28 @@ start_decoding_worker(Oid relid)
 
 	decoding_worker->seg = seg;
 	decoding_worker->error_mqh = mqh;
+
+	/*
+	 * The decoding setup must be done before the caller can have XID assigned
+	 * for any reason, otherwise the worker might end up in a deadlock,
+	 * waiting for the caller's transaction to end. Therefore wait here until
+	 * the worker indicates that it has the logical decoding initialized.
+	 */
+	ConditionVariablePrepareToSleep(&shared->cv);
+	for (;;)
+	{
+		int	initialized;
+
+		SpinLockAcquire(&shared->mutex);
+		initialized = shared->initialized;
+		SpinLockRelease(&shared->mutex);
+
+		if (initialized)
+			break;
+
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
+	}
+	ConditionVariableCancelSleep();
 }
 
 /*
@@ -3724,7 +3949,10 @@ repack_worker_internal(dsm_segment *seg)
 	 */
 	SpinLockAcquire(&shared->mutex);
 	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
-	Assert(!shared->sfs_valid);
+	Assert(shared->response == 0);
+	/* Initially we're expected to provide a snapshot and only that. */
+	Assert(shared->snapshot_requested &&
+		   XLogRecPtrIsInvalid(shared->lsn_upto));
 	sfs = &shared->sfs;
 	SpinLockRelease(&shared->mutex);
 
@@ -3735,17 +3963,35 @@ repack_worker_internal(dsm_segment *seg)
 	 */
 	decoding_ctx = setup_logical_decoding(shared->relid);
 
+	/* Announce that we're ready. */
+	SpinLockAcquire(&shared->mutex);
+	shared->initialized = true;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->cv);
+
 	/* Build the initial snapshot and export it. */
-	snapshot = SnapBuildInitialSnapshotForRepack(decoding_ctx->snapshot_builder);
-	export_initial_snapshot(snapshot, shared);
+	snapshot = SnapBuildSnapshotForRepack(decoding_ctx->snapshot_builder);
+	export_snapshot(snapshot, shared);
+	/*
+	 * Adjust the replication slot's xmin so that VACUUM can do more work.
+	 */
+	LogicalIncreaseXminForSlot(InvalidXLogRecPtr, snapshot->xmin, false);
+	FreeSnapshot(snapshot);
+
+	/* Tell the backend that the file is available. */
+	SpinLockAcquire(&shared->mutex);
+	Assert(shared->snapshot_requested);
+	shared->snapshot_requested = false;
+	shared->response |= WORKER_RESPONSE_SNAPSHOT;
+	shared->last_exported_snapshot++;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->cv);
 
 	/*
-	 * The worker already had to access some system catalogs during startup,
-	 * and we even had to open the relation we are processing. Now that we're
-	 * going to work with historic snapshots, the system caches must be
-	 * invalidated.
+	 * Only historic snapshots should be used now. Do not let us restrict the
+	 * progress of xmin horizon.
 	 */
-	InvalidateSystemCaches();
+	InvalidateCatalogSnapshot();
 
 	while (!decode_concurrent_changes(decoding_ctx, shared))
 		;
@@ -3759,7 +4005,7 @@ repack_worker_internal(dsm_segment *seg)
  * Make snapshot available to the backend that launched the decoding worker.
  */
 static void
-export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
+export_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 {
 	char		fname[MAXPGPATH];
 	BufFile    *file;
@@ -3769,29 +4015,23 @@ export_initial_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 	snap_size = EstimateSnapshotSpace(snapshot);
 	snap_space = (char *) palloc(snap_size);
 	SerializeSnapshot(snapshot, snap_space);
-	FreeSnapshot(snapshot);
 
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported + 1);
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_snapshot + 1,
+						   true);
 	file = BufFileCreateFileSet(&shared->sfs.fs, fname);
 	/* To make restoration easier, write the snapshot size first. */
 	BufFileWrite(file, &snap_size, sizeof(snap_size));
 	BufFileWrite(file, snap_space, snap_size);
 	pfree(snap_space);
 	BufFileClose(file);
-
-	/* Tell the backend that the file is available. */
-	SpinLockAcquire(&shared->mutex);
-	shared->sfs_valid = true;
-	shared->last_exported++;
-	SpinLockRelease(&shared->mutex);
-	ConditionVariableSignal(&shared->cv);
 }
 
 /*
- * Get the initial snapshot from the decoding worker.
+ * Get snapshot from the decoding worker.
  */
-static Snapshot
-get_initial_snapshot(DecodingWorker *worker)
+extern Snapshot
+repack_get_snapshot(ConcurrentChangeContext *ctx)
 {
 	DecodingWorkerShared *shared;
 	char		fname[MAXPGPATH];
@@ -3799,24 +4039,26 @@ get_initial_snapshot(DecodingWorker *worker)
 	Size		snap_size;
 	char	   *snap_space;
 	Snapshot	snapshot;
+	DecodingWorker *worker = ctx->worker;
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(worker->seg);
 
 	/*
-	 * The worker needs to initialize the logical decoding, which usually
-	 * takes some time. Therefore it makes sense to prepare for the sleep
-	 * first.
+	 * For the first snapshot request, the worker needs to initialize the
+	 * logical decoding, which usually takes some time. Therefore it makes
+	 * sense to prepare for the sleep first. Does it make sense to skip the
+	 * preparation on the next requests?
 	 */
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		bool		valid;
+		int	response;
 
 		SpinLockAcquire(&shared->mutex);
-		valid = shared->sfs_valid;
+		response = shared->response;
 		SpinLockRelease(&shared->mutex);
 
-		if (valid)
+		if (response & WORKER_RESPONSE_SNAPSHOT)
 			break;
 
 		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
@@ -3824,7 +4066,9 @@ get_initial_snapshot(DecodingWorker *worker)
 	ConditionVariableCancelSleep();
 
 	/* Read the snapshot from a file. */
-	DecodingWorkerFileName(fname, shared->relid, shared->last_exported);
+	DecodingWorkerFileName(fname, shared->relid,
+						   shared->last_exported_snapshot,
+						   true);
 	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
 	BufFileReadExact(file, &snap_size, sizeof(snap_size));
 	snap_space = (char *) palloc(snap_size);
@@ -3832,7 +4076,8 @@ get_initial_snapshot(DecodingWorker *worker)
 	BufFileClose(file);
 
 	SpinLockAcquire(&shared->mutex);
-	shared->sfs_valid = false;
+	shared->response &= ~WORKER_RESPONSE_SNAPSHOT;
+	Assert(!shared->snapshot_requested);
 	SpinLockRelease(&shared->mutex);
 
 	/* Restore it. */
