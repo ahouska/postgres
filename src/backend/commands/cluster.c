@@ -1,8 +1,24 @@
 /*-------------------------------------------------------------------------
  *
  * cluster.c
- *	  CLUSTER a table on an index.  This is now also used for VACUUM FULL and
- *	  REPACK.
+ *		Implementation of REPACK [CONCURRENTLY], also known as CLUSTER and
+ *		VACUUM FULL.
+ *
+ * There are two somewhat different ways to rewrite a table.  In non-
+ * concurrent mode, it's easy: take AccessExclusiveLock, create a new
+ * transient relation, copy the tuples over to the relfilenode of the new
+ * relation, swap the relfilenodes, then drop the old relation.
+ *
+ * In concurrent mode, we lock the table with only ShareUpdateExclusiveLock,
+ * then do an initial copy as above.  However, while the tuples are being
+ * copied, concurrent transactions could modify the table. To cope with those
+ * changes, we rely on logical decoding to obtain them from WAL.  A bgworker
+ * consumes WAL while the initial copy is ongoing (to prevent excessive WAL
+ * from being reserved), and accumulates the changes in a file.  Once the
+ * initial copy is complete, we read the changes from the file and re-apply
+ * them on the new heap.  Then we upgrade our ShareUpdateExclusiveLock to
+ * AccessExclusiveLock and swap the relfilenodes.  This way, the time we hold
+ * a strong lock on the table is much reduced, and the bloat is eliminated.
  *
  * There is hardly anything left of Paul Brown's original implementation...
  *
