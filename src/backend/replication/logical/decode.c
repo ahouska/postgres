@@ -597,6 +597,7 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		case XLOG_HEAP_TRUNCATE:
 			/* Is REPACK (CONCURRENTLY) being run by this backend? */
 			if (OidIsValid(repacked_rel_locator.relNumber))
+
 				/*
 				 * TRUNCATE changes rd_locator of the relation, so it'd break
 				 * REPACK (CONCURRENTLY). In fact it should not happen because
@@ -1002,7 +1003,7 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	xl_heap_insert *xlrec;
 	ReorderBufferChange *change;
 	RelFileLocator target_locator;
-	BlockNumber		blknum;
+	BlockNumber blknum;
 
 	xlrec = (xl_heap_insert *) XLogRecGetData(r);
 
@@ -1040,8 +1041,8 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	DecodeXLogTuple(tupledata, datalen, change->data.tp.newtuple);
 
 	/*
-	 * REPACK (CONCURRENTLY) needs block number to check if the
-	 * corresponding part of the table was already copied.
+	 * REPACK (CONCURRENTLY) needs block number to check if the corresponding
+	 * part of the table was already copied.
 	 */
 	if (OidIsValid(repacked_rel_locator.relNumber))
 		/* offnum is not really needed, but let's set valid pointer. */
@@ -1069,7 +1070,7 @@ DecodeUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	ReorderBufferChange *change;
 	char	   *data;
 	RelFileLocator target_locator;
-	BlockNumber		new_blknum;
+	BlockNumber new_blknum;
 
 	xlrec = (xl_heap_update *) XLogRecGetData(r);
 
@@ -1115,7 +1116,7 @@ DecodeUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		Size		datalen;
 		Size		tuplelen;
-		BlockNumber		old_blknum;
+		BlockNumber old_blknum;
 
 		if (XLogRecHasBlockRef(r, 1))
 			XLogRecGetBlockTag(r, 1, NULL, NULL, &old_blknum);
@@ -1156,7 +1157,7 @@ DecodeDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	xl_heap_delete *xlrec;
 	ReorderBufferChange *change;
 	RelFileLocator target_locator;
-	BlockNumber		blknum;
+	BlockNumber blknum;
 
 	xlrec = (xl_heap_delete *) XLogRecGetData(r);
 

@@ -87,7 +87,7 @@ typedef struct ConcurrentChangeContext
 	 * Background worker performing logical decoding of concurrent data
 	 * changes.
 	 */
-	DecodingWorker	*worker;
+	DecodingWorker *worker;
 
 	/*
 	 * The following is needed to find the existing tuple if the change is
@@ -102,9 +102,9 @@ typedef struct ConcurrentChangeContext
 	IndexInsertState *iistate;
 
 	/* The first block of the scan used to copy the heap. */
-	BlockNumber		first_block;
+	BlockNumber first_block;
 	/* List of RepackApplyRange objects. */
-	List	*block_ranges;
+	List	   *block_ranges;
 } ConcurrentChangeContext;
 
 /*

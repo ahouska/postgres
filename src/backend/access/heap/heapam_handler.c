@@ -708,10 +708,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool	   *isnull;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
-	ConcurrentChangeContext	*ctx = (ConcurrentChangeContext *) tableam_data;
+	ConcurrentChangeContext *ctx = (ConcurrentChangeContext *) tableam_data;
 	bool		concurrent = ctx != NULL;
 	Snapshot	snapshot = NULL;
-	BlockNumber	range_end = InvalidBlockNumber;
+	BlockNumber range_end = InvalidBlockNumber;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -780,6 +780,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
 		heapScan = (HeapScanDesc) tableScan;
+
 		/*
 		 * In CONCURRENTLY mode we scan the table by ranges of blocks and the
 		 * algorithm below expects forward direction. (No other direction
@@ -970,8 +971,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		}
 		else
 		{
-			BlockNumber	blkno;
-			bool	visible;
+			BlockNumber blkno;
+			bool		visible;
 
 			/*
 			 * With CONCURRENTLY, we use each snapshot only for certain range
@@ -998,18 +999,20 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					XLogRecPtr	end_of_wal;
 
 					PopActiveSnapshot();
+
 					/*
 					 * XXX It might be worth Assert(CatalogSnapshot == NULL)
 					 * here, however that symbol is not external.
 					 */
 
 					/*
-					 * Decode all the concurrent data changes committed so
-					 * far - these will be applicable to the current range.
+					 * Decode all the concurrent data changes committed so far
+					 * - these will be applicable to the current range.
 					 */
 					end_of_wal = GetFlushRecPtr(NULL);
 					repack_get_concurrent_changes(ctx, end_of_wal, range_end,
 												  true, false);
+
 					/*
 					 * Define the next range.
 					 */

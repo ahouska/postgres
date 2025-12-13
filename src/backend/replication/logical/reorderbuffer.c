@@ -3766,8 +3766,11 @@ ReorderBufferXidHasHeapChanges(ReorderBuffer *rb, TransactionId xid)
 	}
 
 	/* Check subtransactions. */
-	/* TODO Verify that subtransactions must be assigned to the top-level
-	 * transactions by now. */
+
+	/*
+	 * TODO Verify that subtransactions must be assigned to the top-level
+	 * transactions by now.
+	 */
 	dlist_foreach(iter, &txn->subtxns)
 	{
 		ReorderBufferTXN *subtxn;

@@ -117,7 +117,7 @@ static XLogSegNo repack_current_segment = 0;
  * When REPACK (CONCURRENTLY) copies data to the new heap, a new snapshot is
  * built after processing this many pages.
  */
-int repack_blocks_per_snapshot = 1024;
+int			repack_blocks_per_snapshot = 1024;
 
 /*
  * Remember here to which pages should applied to changes recorded in given
@@ -126,10 +126,10 @@ int repack_blocks_per_snapshot = 1024;
 typedef struct RepackApplyRange
 {
 	/* The first block of the next range. */
-	BlockNumber		end;
+	BlockNumber end;
 
 	/* File containing the changes to be applied to blocks in this range. */
-	char	*fname;
+	char	   *fname;
 } RepackApplyRange;
 
 /*
@@ -139,10 +139,10 @@ typedef struct RepackApplyRange
 typedef struct DecodingWorkerShared
 {
 	/* Is the decoding initialized? */
-	bool	initialized;
+	bool		initialized;
 
 	/* Set to request a snapshot. */
-	bool	snapshot_requested;
+	bool		snapshot_requested;
 
 	/*
 	 * Once the worker has reached this LSN, it should close the current
@@ -159,7 +159,7 @@ typedef struct DecodingWorkerShared
 #define	WORKER_RESPONSE_SNAPSHOT	0x1
 #define	WORKER_RESPONSE_CHANGES		0x2
 	/* Which kind of data is ready? */
-	int		response;;
+	int			response;;
 
 	/* Exit after closing the current file? */
 	bool		done;
@@ -294,7 +294,7 @@ static void start_decoding_worker(Oid relid);
 static void stop_decoding_worker(void);
 static void repack_worker_internal(dsm_segment *seg);
 static void export_snapshot(Snapshot snapshot,
-									DecodingWorkerShared *shared);
+							DecodingWorkerShared *shared);
 static void ProcessRepackMessage(StringInfo msg);
 static const char *RepackCommandAsString(RepackCommand cmd);
 
@@ -1037,7 +1037,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	bool		swap_toast_by_content;
 	TransactionId frozenXid;
 	MultiXactId cutoffMulti;
-	ConcurrentChangeContext		*ctx = NULL;
+	ConcurrentChangeContext *ctx = NULL;
 #if USE_ASSERT_CHECKING
 	LOCKMODE	lmode;
 
@@ -1430,6 +1430,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 			use_sort = plan_cluster_use_sort(RelationGetRelid(OldHeap),
 											 RelationGetRelid(OldIndex));
 		else
+
 			/*
 			 * To use multiple snapshots, we need to process the table
 			 * sequentially.
@@ -2565,7 +2566,7 @@ setup_logical_decoding(Oid relid)
 	 * WAL.
 	 */
 	ctx->reader->private_data = MemoryContextAllocZero(ctx->context,
-													  sizeof(ReadLocalXLogPageNoWaitPrivate));
+													   sizeof(ReadLocalXLogPageNoWaitPrivate));
 
 
 	/* Some WAL records should have been read. */
@@ -2717,7 +2718,7 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			/* Wait a bit before we retry reading WAL. */
 			(void) WaitLatch(MyLatch,
 							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-							 100000L, /* XXX Tune the delay. */
+							 100000L,	/* XXX Tune the delay. */
 							 WAIT_EVENT_REPACK_WORKER_MAIN);
 	}
 
@@ -2738,6 +2739,7 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 
 		snapshot = SnapBuildSnapshotForRepack(ctx->snapshot_builder);
 		export_snapshot(snapshot, shared);
+
 		/*
 		 * Adjust the replication slot's xmin so that VACUUM can do more work.
 		 */
@@ -2781,14 +2783,14 @@ static void
 apply_concurrent_changes(ConcurrentChangeContext *ctx)
 {
 	DecodingWorkerShared *shared;
-	ListCell	*lc;
+	ListCell   *lc;
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 
 	foreach(lc, ctx->block_ranges)
 	{
-		RepackApplyRange	*range;
-		BufFile *file;
+		RepackApplyRange *range;
+		BufFile    *file;
 
 		range = (RepackApplyRange *) lfirst(lc);
 
@@ -2826,7 +2828,7 @@ apply_concurrent_changes_file(ConcurrentChangeContext *ctx, BufFile *file,
 	TupleTableSlot *index_slot,
 			   *ident_slot;
 	HeapTuple	tup_old = NULL;
-	bool	check_range = BlockNumberIsValid(range_end);
+	bool		check_range = BlockNumberIsValid(range_end);
 
 	/* TupleTableSlot is needed to pass the tuple to ExecInsertIndexTuples(). */
 	index_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
@@ -2890,7 +2892,7 @@ apply_concurrent_changes_file(ConcurrentChangeContext *ctx, BufFile *file,
 			/*
 			 * Find the tuple to be updated or deleted.
 			 */
-			if (!check_range||
+			if (!check_range ||
 				(is_tuple_in_block_range(tup_key, ctx->first_block,
 										 range_end)))
 			{
@@ -2911,6 +2913,7 @@ apply_concurrent_changes_file(ConcurrentChangeContext *ctx, BufFile *file,
 						apply_concurrent_update(rel, tup, tup_exist,
 												ctx->iistate, index_slot);
 					else
+
 						/*
 						 * The new key is in the other range, so only delete
 						 * it from the current one. The new version should be
@@ -3080,7 +3083,7 @@ apply_concurrent_delete(Relation rel, HeapTuple tup_target)
 static bool
 is_tuple_in_block_range(HeapTuple tup, BlockNumber start, BlockNumber end)
 {
-	BlockNumber	blknum;
+	BlockNumber blknum;
 
 	Assert(BlockNumberIsValid(start) && BlockNumberIsValid(end));
 
@@ -3199,7 +3202,7 @@ repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int	response;
+		int			response;
 
 		SpinLockAcquire(&shared->mutex);
 		response = shared->response;
@@ -3213,9 +3216,9 @@ repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 	ConditionVariableCancelSleep();
 
 	/*
-	 * Remember the file name so we can apply the changes when
-	 * appropriate. One particular reason to postpone the replay is that
-	 * indexes haven't been built yet on the new heap.
+	 * Remember the file name so we can apply the changes when appropriate.
+	 * One particular reason to postpone the replay is that indexes haven't
+	 * been built yet on the new heap.
 	 */
 	DecodingWorkerFileName(fname, shared->relid,
 						   shared->last_exported_changes,
@@ -3233,7 +3236,7 @@ static void
 repack_add_block_range(ConcurrentChangeContext *ctx, BlockNumber end,
 					   char *fname)
 {
-	RepackApplyRange	*range;
+	RepackApplyRange *range;
 
 	range = palloc_object(RepackApplyRange);
 	range->end = end;
@@ -3452,6 +3455,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 		}
 	}
 	if (!OidIsValid(ident_idx_new))
+
 		/*
 		 * Should not happen, given our lock on the old relation.
 		 */
@@ -3622,7 +3626,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 
 		swap_relation_files(ind_old, ind_new,
 							(old_table_oid == RelationRelationId),
-							false, /* swap_toast_by_content */
+							false,	/* swap_toast_by_content */
 							true,
 							InvalidTransactionId,
 							InvalidMultiXactId,
@@ -3660,7 +3664,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	Assert(!is_system_catalog);
 	finish_heap_swap(old_table_oid, new_table_oid,
 					 is_system_catalog,
-					 false, /* swap_toast_by_content */
+					 false,		/* swap_toast_by_content */
 					 false, true, false,
 					 frozenXid, cutoffMulti,
 					 relpersistence);
@@ -3809,7 +3813,7 @@ start_decoding_worker(Oid relid)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int	initialized;
+		int			initialized;
 
 		SpinLockAcquire(&shared->mutex);
 		initialized = shared->initialized;
@@ -3988,6 +3992,7 @@ repack_worker_internal(dsm_segment *seg)
 	/* Build the initial snapshot and export it. */
 	snapshot = SnapBuildSnapshotForRepack(decoding_ctx->snapshot_builder);
 	export_snapshot(snapshot, shared);
+
 	/*
 	 * Adjust the replication slot's xmin so that VACUUM can do more work.
 	 */
@@ -4068,7 +4073,7 @@ repack_get_snapshot(ConcurrentChangeContext *ctx)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int	response;
+		int			response;
 
 		SpinLockAcquire(&shared->mutex);
 		response = shared->response;

@@ -1699,6 +1699,7 @@ LogicalIncreaseXminForSlot(XLogRecPtr current_lsn, TransactionId xmin,
 		 * saving to disk).
 		 */
 		Assert(slot->data.persistency == RS_TEMPORARY);
+
 		/*
 		 * The horizon must not go backwards, however it's o.k. to become
 		 * invalid.

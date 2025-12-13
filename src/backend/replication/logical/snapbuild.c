@@ -1035,6 +1035,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 			needs_timetravel = true;
 		}
 	}
+
 	/*
 	 * Is REPACKED (CONCURRENTLY) is being run by this backend?
 	 */
@@ -1049,6 +1050,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		 * this transaction changes the relation being repacked.
 		 */
 		if (ReorderBufferXidHasHeapChanges(builder->reorder, xid))
+
 			/*
 			 * Record the commit so we can build snapshots for the relation
 			 * being repacked.
