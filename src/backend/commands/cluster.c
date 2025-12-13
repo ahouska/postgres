@@ -2199,7 +2199,7 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 
 			/* Use a permanent memory context for the result list */
 			oldcxt = MemoryContextSwitchTo(permcxt);
-			rtc = palloc(sizeof(RelToCluster));
+			rtc = palloc_object(RelToCluster);
 			rtc->tableOid = index->indrelid;
 			rtc->indexOid = index->indexrelid;
 			rtcs = lappend(rtcs, rtc);
@@ -2247,7 +2247,7 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 
 			/* Use a permanent memory context for the result list */
 			oldcxt = MemoryContextSwitchTo(permcxt);
-			rtc = palloc(sizeof(RelToCluster));
+			rtc = palloc_object(RelToCluster);
 			rtc->tableOid = class->oid;
 			rtc->indexOid = InvalidOid;
 			rtcs = lappend(rtcs, rtc);
@@ -2319,7 +2319,7 @@ get_tables_to_repack_partitioned(RepackCommand cmd, Oid relid,
 
 		/* Use a permanent memory context for the result list */
 		oldcxt = MemoryContextSwitchTo(permcxt);
-		rtc = palloc(sizeof(RelToCluster));
+		rtc = palloc_object(RelToCluster);
 		rtc->tableOid = table_oid;
 		rtc->indexOid = index_oid;
 		rtcs = lappend(rtcs, rtc);

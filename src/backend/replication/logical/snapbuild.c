@@ -200,7 +200,7 @@ AllocateSnapshotBuilder(ReorderBuffer *reorder,
 									ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 
-	builder = palloc0(sizeof(SnapBuild));
+	builder = palloc0_object(SnapBuild);
 
 	builder->state = SNAPBUILD_START;
 	builder->context = context;
@@ -531,8 +531,7 @@ SnapBuildMVCCFromHistoric(Snapshot snapshot, bool in_place)
 	int			newxcnt = 0;
 	Snapshot	result;
 
-	newxip = (TransactionId *)
-		palloc(sizeof(TransactionId) * GetMaxSnapshotXidCount());
+	newxip = palloc_array(TransactionId, GetMaxSnapshotXidCount());
 
 	/*
 	 * snapbuild.c builds transactions in an "inverted" manner, which means it

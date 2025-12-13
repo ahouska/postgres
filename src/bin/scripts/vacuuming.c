@@ -30,21 +30,21 @@ static int	vacuum_one_database(ConnParams *cparams,
 								SimpleStringList *objects,
 								SimpleStringList **found_objs,
 								int concurrentCons,
-								const char *progname, bool echo, bool quiet);
+								const char *progname);
 static int	vacuum_all_databases(ConnParams *cparams,
 								 vacuumingOptions *vacopts,
 								 SimpleStringList *objects,
 								 int concurrentCons,
-								 const char *progname, bool echo, bool quiet);
+								 const char *progname);
 static SimpleStringList *retrieve_objects(PGconn *conn,
 										  vacuumingOptions *vacopts,
-										  SimpleStringList *objects,
-										  bool echo);
+										  SimpleStringList *objects);
 static void free_retrieved_objects(SimpleStringList *list);
 static void prepare_vacuum_command(PGconn *conn, PQExpBuffer sql,
 								   vacuumingOptions *vacopts, const char *table);
-static void run_vacuum_command(PGconn *conn, vacuumingOptions *vacopts,
-							   const char *sql, bool echo, const char *table);
+static void run_vacuum_command(ParallelSlot *free_slot,
+							   vacuumingOptions *vacopts, const char *sql,
+							   const char *table);
 
 /*
  * Executes vacuum/analyze as indicated.  Returns 0 if the plan is carried
@@ -56,7 +56,7 @@ vacuuming_main(ConnParams *cparams, const char *dbname,
 			   const char *maintenance_db, vacuumingOptions *vacopts,
 			   SimpleStringList *objects,
 			   unsigned int tbl_count, int concurrentCons,
-			   const char *progname, bool echo, bool quiet)
+			   const char *progname)
 {
 	setup_cancel_handler(NULL);
 
@@ -71,7 +71,7 @@ vacuuming_main(ConnParams *cparams, const char *dbname,
 		return vacuum_all_databases(cparams, vacopts,
 									objects,
 									concurrentCons,
-									progname, echo, quiet);
+									progname);
 	}
 	else
 	{
@@ -100,7 +100,7 @@ vacuuming_main(ConnParams *cparams, const char *dbname,
 										  objects,
 										  vacopts->missing_stats_only ? &found_objs : NULL,
 										  concurrentCons,
-										  progname, echo, quiet);
+										  progname);
 				if (ret != 0)
 				{
 					free_retrieved_objects(found_objs);
@@ -116,7 +116,7 @@ vacuuming_main(ConnParams *cparams, const char *dbname,
 									   ANALYZE_NO_STAGE,
 									   objects, NULL,
 									   concurrentCons,
-									   progname, echo, quiet);
+									   progname);
 	}
 }
 
@@ -167,7 +167,7 @@ vacuum_one_database(ConnParams *cparams,
 					SimpleStringList *objects,
 					SimpleStringList **found_objs,
 					int concurrentCons,
-					const char *progname, bool echo, bool quiet)
+					const char *progname)
 {
 	PQExpBufferData sql;
 	PGconn	   *conn;
@@ -192,7 +192,7 @@ vacuum_one_database(ConnParams *cparams,
 	Assert(stage == ANALYZE_NO_STAGE ||
 		   (stage >= 0 && stage < ANALYZE_NUM_STAGES));
 
-	conn = connectDatabase(cparams, progname, echo, false, true);
+	conn = connectDatabase(cparams, progname, vacopts->echo, false, true);
 
 	if (vacopts->mode == MODE_REPACK && PQserverVersion(conn) < 190000)
 	{
@@ -289,7 +289,7 @@ vacuum_one_database(ConnParams *cparams,
 	/* skip_database_stats is used automatically if server supports it */
 	vacopts->skip_database_stats = (PQserverVersion(conn) >= 160000);
 
-	if (!quiet)
+	if (!vacopts->quiet)
 	{
 		if (vacopts->mode == MODE_ANALYZE_IN_STAGES)
 			printf(_("%s: processing database \"%s\": %s\n"),
@@ -319,7 +319,7 @@ vacuum_one_database(ConnParams *cparams,
 		retobjs = *found_objs;
 	else
 	{
-		retobjs = retrieve_objects(conn, vacopts, objects, echo);
+		retobjs = retrieve_objects(conn, vacopts, objects);
 		if (found_objs)
 			*found_objs = retobjs;
 		else
@@ -358,7 +358,11 @@ vacuum_one_database(ConnParams *cparams,
 	if (vacopts->mode == MODE_ANALYZE_IN_STAGES)
 	{
 		initcmd = stage_commands[stage];
-		executeCommand(conn, initcmd, echo);
+
+		if (vacopts->dry_run)
+			printf("%s\n", initcmd);
+		else
+			executeCommand(conn, initcmd, vacopts->echo);
 	}
 	else
 		initcmd = NULL;
@@ -368,7 +372,8 @@ vacuum_one_database(ConnParams *cparams,
 	 * for the first slot.  If not in parallel mode, the first slot in the
 	 * array contains the connection.
 	 */
-	sa = ParallelSlotsSetup(concurrentCons, cparams, progname, echo, initcmd);
+	sa = ParallelSlotsSetup(concurrentCons, cparams, progname,
+							vacopts->echo, initcmd);
 	ParallelSlotsAdoptConn(sa, conn);
 
 	initPQExpBuffer(&sql);
@@ -400,8 +405,7 @@ vacuum_one_database(ConnParams *cparams,
 		 * through ParallelSlotsGetIdle.
 		 */
 		ParallelSlotSetHandler(free_slot, TableCommandResultHandler, NULL);
-		run_vacuum_command(free_slot->connection, vacopts, sql.data,
-						   echo, tabname);
+		run_vacuum_command(free_slot, vacopts, sql.data, tabname);
 
 		cell = cell->next;
 	} while (cell != NULL);
@@ -425,7 +429,7 @@ vacuum_one_database(ConnParams *cparams,
 		}
 
 		ParallelSlotSetHandler(free_slot, TableCommandResultHandler, NULL);
-		run_vacuum_command(free_slot->connection, vacopts, cmd, echo, NULL);
+		run_vacuum_command(free_slot, vacopts, cmd, NULL);
 
 		if (!ParallelSlotsWaitCompletion(sa))
 			ret = EXIT_FAILURE; /* error already reported by handler */
@@ -453,17 +457,17 @@ vacuum_all_databases(ConnParams *cparams,
 					 vacuumingOptions *vacopts,
 					 SimpleStringList *objects,
 					 int concurrentCons,
-					 const char *progname, bool echo, bool quiet)
+					 const char *progname)
 {
 	int			ret = EXIT_SUCCESS;
 	PGconn	   *conn;
 	PGresult   *result;
 	int			numdbs;
 
-	conn = connectMaintenanceDatabase(cparams, progname, echo);
+	conn = connectMaintenanceDatabase(cparams, progname, vacopts->echo);
 	result = executeQuery(conn,
 						  "SELECT datname FROM pg_database WHERE datallowconn AND datconnlimit <> -2 ORDER BY 1;",
-						  echo);
+						  vacopts->echo);
 	numdbs = PQntuples(result);
 	PQfinish(conn);
 
@@ -491,7 +495,7 @@ vacuum_all_databases(ConnParams *cparams,
 										  objects,
 										  vacopts->missing_stats_only ? &found_objs[i] : NULL,
 										  concurrentCons,
-										  progname, echo, quiet);
+										  progname);
 				if (ret != EXIT_SUCCESS)
 					break;
 			}
@@ -516,7 +520,7 @@ vacuum_all_databases(ConnParams *cparams,
 									  objects,
 									  NULL,
 									  concurrentCons,
-									  progname, echo, quiet);
+									  progname);
 			if (ret != EXIT_SUCCESS)
 				break;
 		}
@@ -541,7 +545,7 @@ vacuum_all_databases(ConnParams *cparams,
  */
 static SimpleStringList *
 retrieve_objects(PGconn *conn, vacuumingOptions *vacopts,
-				 SimpleStringList *objects, bool echo)
+				 SimpleStringList *objects)
 {
 	PQExpBufferData buf;
 	PQExpBufferData catalog_query;
@@ -822,10 +826,10 @@ retrieve_objects(PGconn *conn, vacuumingOptions *vacopts,
 	 * query for consistency with table lookups done elsewhere by the user.
 	 */
 	appendPQExpBufferStr(&catalog_query, " ORDER BY c.relpages DESC;");
-	executeCommand(conn, "RESET search_path;", echo);
-	res = executeQuery(conn, catalog_query.data, echo);
+	executeCommand(conn, "RESET search_path;", vacopts->echo);
+	res = executeQuery(conn, catalog_query.data, vacopts->echo);
 	termPQExpBuffer(&catalog_query);
-	PQclear(executeQuery(conn, ALWAYS_SECURE_SEARCH_PATH_SQL, echo));
+	PQclear(executeQuery(conn, ALWAYS_SECURE_SEARCH_PATH_SQL, vacopts->echo));
 
 	/*
 	 * Build qualified identifiers for each table, including the column list
@@ -1074,20 +1078,25 @@ prepare_vacuum_command(PGconn *conn, PQExpBuffer sql,
 
 /*
  * Send a vacuum/analyze command to the server, returning after sending the
- * command.
+ * command.  If dry_run is true, the command is printed but not sent to the
+ * server.
  *
  * Any errors during command execution are reported to stderr.
  */
 static void
-run_vacuum_command(PGconn *conn, vacuumingOptions *vacopts,
-				   const char *sql, bool echo, const char *table)
+run_vacuum_command(ParallelSlot *free_slot, vacuumingOptions *vacopts,
+				   const char *sql, const char *table)
 {
-	bool		status;
+	bool		status = true;
+	PGconn	   *conn = free_slot->connection;
 
-	if (echo)
+	if (vacopts->echo || vacopts->dry_run)
 		printf("%s\n", sql);
 
-	status = PQsendQuery(conn, sql) == 1;
+	if (vacopts->dry_run)
+		ParallelSlotSetIdle(free_slot);
+	else
+		status = PQsendQuery(conn, sql) == 1;
 
 	if (!status)
 	{
