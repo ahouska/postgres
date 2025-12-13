@@ -1099,6 +1099,12 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 
 	if (concurrent)
 	{
+		/*
+		 * Make sure the active snapshot can see the data copied, so the rows
+		 * can be updated / deleted.
+		 */
+		UpdateActiveSnapshotCommandId();
+
 		Assert(!swap_toast_by_content);
 		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
 										   frozenXid, cutoffMulti, ctx);
