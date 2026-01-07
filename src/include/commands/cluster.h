@@ -90,6 +90,14 @@ typedef struct ConcurrentChangeContext
 	DecodingWorker *worker;
 
 	/*
+	 * Sequential numbers of the most recent files containing snapshots and
+	 * data changes respectively. These files are created by the decoding
+	 * worker.
+	 */
+	int		file_seq_snapshot;
+	int		file_seq_changes;
+
+	/*
 	 * The following is needed to find the existing tuple if the change is
 	 * UPDATE or DELETE. 'ident_key' should have all the fields except for
 	 * 'sk_argument' initialized.

@@ -157,11 +157,6 @@ typedef struct DecodingWorkerShared
 	 */
 	XLogRecPtr	lsn_upto;
 
-#define	WORKER_RESPONSE_SNAPSHOT	0x1
-#define	WORKER_RESPONSE_CHANGES		0x2
-	/* Which kind of data is ready? */
-	int			response;;
-
 	/* Exit after closing the current file? */
 	bool		done;
 
@@ -169,8 +164,8 @@ typedef struct DecodingWorkerShared
 	SharedFileSet sfs;
 
 	/* Number of the last file exported by the worker. */
-	int			last_exported_changes;
 	int			last_exported_snapshot;
+	int			last_exported_changes;
 
 	/* Synchronize access to the fields above. */
 	slock_t		mutex;
@@ -2776,16 +2771,17 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 
 	}
 
-	/* Now announce that the output is available. */
+	/*
+	 * Now increase the counter(s) to announce that the output is
+	 * available.
+	 */
 	SpinLockAcquire(&shared->mutex);
-	shared->lsn_upto = InvalidXLogRecPtr;
-	shared->response |= WORKER_RESPONSE_CHANGES;
 	shared->last_exported_changes++;
+	shared->lsn_upto = InvalidXLogRecPtr;
 	if (snapshot_requested)
 	{
-		shared->snapshot_requested = false;
-		shared->response |= WORKER_RESPONSE_SNAPSHOT;
 		shared->last_exported_snapshot++;
+		shared->snapshot_requested = false;
 	}
 	SpinLockRelease(&shared->mutex);
 
@@ -3220,13 +3216,16 @@ repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int			response;
+		int		last_exported;
 
 		SpinLockAcquire(&shared->mutex);
-		response = shared->response;
+		last_exported = shared->last_exported_changes;
 		SpinLockRelease(&shared->mutex);
 
-		if (response & WORKER_RESPONSE_CHANGES)
+		/*
+		 * Has the worker exported the file we are waiting for?
+		 */
+		if (last_exported == ctx->file_seq_changes)
 			break;
 
 		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
@@ -3238,16 +3237,19 @@ repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 	 * One particular reason to postpone the replay is that indexes haven't
 	 * been built yet on the new heap.
 	 */
-	DecodingWorkerFileName(fname, shared->relid,
-						   shared->last_exported_changes,
+	DecodingWorkerFileName(fname, shared->relid, ctx->file_seq_changes,
 						   false);
 	repack_add_block_range(ctx, range_end, fname);
 
+#ifdef USE_ASSERT_CHECKING
 	/* No file is exported until the worker exports the next one. */
 	SpinLockAcquire(&shared->mutex);
-	shared->response &= ~WORKER_RESPONSE_CHANGES;
 	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
 	SpinLockRelease(&shared->mutex);
+#endif
+
+	/* Get ready for the next set of changes. */
+	ctx->file_seq_changes++;
 }
 
 static void
@@ -3775,7 +3777,6 @@ start_decoding_worker(Oid relid)
 	shared->done = false;
 	/* Snapshot is the first thing we need from the worker. */
 	shared->snapshot_requested = true;
-	shared->response = 0;
 	SharedFileSetInit(&shared->sfs, seg);
 	shared->last_exported_changes = -1;
 	shared->last_exported_snapshot = -1;
@@ -3987,7 +3988,6 @@ repack_worker_internal(dsm_segment *seg)
 	 */
 	SpinLockAcquire(&shared->mutex);
 	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
-	Assert(shared->response == 0);
 	/* Initially we're expected to provide a snapshot and only that. */
 	Assert(shared->snapshot_requested &&
 		   XLogRecPtrIsInvalid(shared->lsn_upto));
@@ -4017,12 +4017,11 @@ repack_worker_internal(dsm_segment *seg)
 	LogicalIncreaseXminForSlot(InvalidXLogRecPtr, snapshot->xmin, false);
 	FreeSnapshot(snapshot);
 
-	/* Tell the backend that the file is available. */
+	/* Increase the counter to tell the backend that the file is available. */
 	SpinLockAcquire(&shared->mutex);
 	Assert(shared->snapshot_requested);
-	shared->snapshot_requested = false;
-	shared->response |= WORKER_RESPONSE_SNAPSHOT;
 	shared->last_exported_snapshot++;
+	shared->snapshot_requested = false;
 	SpinLockRelease(&shared->mutex);
 	ConditionVariableSignal(&shared->cv);
 
@@ -4091,13 +4090,16 @@ repack_get_snapshot(ConcurrentChangeContext *ctx)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int			response;
+		int		last_exported;
 
 		SpinLockAcquire(&shared->mutex);
-		response = shared->response;
+		last_exported = shared->last_exported_snapshot;
 		SpinLockRelease(&shared->mutex);
 
-		if (response & WORKER_RESPONSE_SNAPSHOT)
+		/*
+		 * Has the worker exported the file we are waiting for?
+		 */
+		if (last_exported == ctx->file_seq_snapshot)
 			break;
 
 		ConditionVariableSleep(&shared->cv, WAIT_EVENT_REPACK_WORKER_EXPORT);
@@ -4105,8 +4107,7 @@ repack_get_snapshot(ConcurrentChangeContext *ctx)
 	ConditionVariableCancelSleep();
 
 	/* Read the snapshot from a file. */
-	DecodingWorkerFileName(fname, shared->relid,
-						   shared->last_exported_snapshot,
+	DecodingWorkerFileName(fname, shared->relid, ctx->file_seq_snapshot,
 						   true);
 	file = BufFileOpenFileSet(&shared->sfs.fs, fname, O_RDONLY, false);
 	BufFileReadExact(file, &snap_size, sizeof(snap_size));
@@ -4114,14 +4115,18 @@ repack_get_snapshot(ConcurrentChangeContext *ctx)
 	BufFileReadExact(file, snap_space, snap_size);
 	BufFileClose(file);
 
+#ifdef USE_ASSERT_CHECKING
 	SpinLockAcquire(&shared->mutex);
-	shared->response &= ~WORKER_RESPONSE_SNAPSHOT;
 	Assert(!shared->snapshot_requested);
 	SpinLockRelease(&shared->mutex);
+#endif
 
 	/* Restore it. */
 	snapshot = RestoreSnapshot(snap_space);
 	pfree(snap_space);
+
+	/* Get ready for the next snapshot. */
+	ctx->file_seq_snapshot++;
 
 	return snapshot;
 }
@@ -4180,7 +4185,7 @@ ProcessRepackMessages(void)
 	 */
 	if (hpm_context == NULL)	/* first time through? */
 		hpm_context = AllocSetContextCreate(TopMemoryContext,
-											"ProcessParallelMessages",
+											"ProcessRepackMessages",
 											ALLOCSET_DEFAULT_SIZES);
 	else
 		MemoryContextReset(hpm_context);
@@ -4219,7 +4224,7 @@ ProcessRepackMessages(void)
 			 * The decoding worker is special in that it exits as soon as it
 			 * has its work done. Thus the DETACHED result code is fine.
 			 */
-			Assert(res = SHM_MQ_DETACHED);
+			Assert(res == SHM_MQ_DETACHED);
 
 			break;
 		}
