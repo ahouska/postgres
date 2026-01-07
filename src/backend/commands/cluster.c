@@ -46,6 +46,7 @@
 #include "access/xlog_internal.h"
 #include "access/xloginsert.h"
 #include "access/xlogutils.h"
+#include "access/xlogwait.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
@@ -2684,14 +2685,12 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			/*
 			 * In the decoding loop we do not want to get blocked when there
 			 * is no more WAL available, otherwise the loop would become
-			 * uninterruptible. The point is that the worker is only useful if
-			 * it starts decoding before lsn_upto is set. Thus it can reach
-			 * the end of WAL and find out later that it did not have to go
-			 * that far.
+			 * uninterruptible.
 			 */
 			priv = (ReadLocalXLogPageNoWaitPrivate *)
 				ctx->reader->private_data;
 			if (priv->end_of_wal)
+				/* Do not miss the end of WAL condition next time. */
 				priv->end_of_wal = false;
 			else
 				ereport(ERROR, (errmsg("could not read WAL record")));
@@ -2715,11 +2714,30 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			break;
 
 		if (record == NULL)
-			/* Wait a bit before we retry reading WAL. */
-			(void) WaitLatch(MyLatch,
-							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-							 100000L,	/* XXX Tune the delay. */
-							 WAIT_EVENT_REPACK_WORKER_MAIN);
+		{
+			int64 timeout = 0;
+			WaitLSNResult	res;
+
+			/*
+			 * Before we retry reading, wait until new WAL is flushed.
+			 *
+			 * There is a race condition such that the backend executing
+			 * REPACK determines 'lsn_upto', but before it sets the shared
+			 * variable, we reach the end of WAL. In that case we'd need to
+			 * wait until the next WAL flush (unrelated to REPACK). Although
+			 * that should not be a problem in a busy system, it might be
+			 * noticeable in other cases, including regression tests (which
+			 * are not necessarily executed in parallel). Therefore it make
+			 * sense to use timeout when appropriate.
+			 */
+			if (XLogRecPtrIsInvalid(lsn_upto))
+				timeout = 1000L;
+			res = WaitForLSN(WAIT_LSN_TYPE_FLUSH, ctx->reader->EndRecPtr + 1,
+							 timeout);
+			if (res != WAIT_LSN_RESULT_SUCCESS &&
+				res != WAIT_LSN_RESULT_TIMEOUT)
+				ereport(ERROR, (errmsg("waiting for WAL failed")));
+		}
 	}
 
 	/*
