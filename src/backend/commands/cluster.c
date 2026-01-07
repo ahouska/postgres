@@ -2722,11 +2722,14 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			 * wait until the next WAL flush (unrelated to REPACK). Although
 			 * that should not be a problem in a busy system, it might be
 			 * noticeable in other cases, including regression tests (which
-			 * are not necessarily executed in parallel). Therefore it make
-			 * sense to use timeout when appropriate.
+			 * are not necessarily executed in parallel). Therefore it makes
+			 * sense to use timeout.
+			 *
+			 * If lsn_upto is valid, WAL records having LSN lower than that
+			 * should already have been flushed to disk.
 			 */
 			if (XLogRecPtrIsInvalid(lsn_upto))
-				timeout = 1000L;
+				timeout = 100L;
 			res = WaitForLSN(WAIT_LSN_TYPE_FLUSH, ctx->reader->EndRecPtr + 1,
 							 timeout);
 			if (res != WAIT_LSN_RESULT_SUCCESS &&
