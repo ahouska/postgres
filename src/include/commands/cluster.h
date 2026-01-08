@@ -24,7 +24,6 @@
 #include "storage/shm_mq.h"
 #include "utils/relcache.h"
 #include "utils/resowner.h"
-#include "utils/tuplestore.h"
 
 
 /* flag bits for ClusterParams->options */
