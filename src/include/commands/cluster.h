@@ -16,11 +16,11 @@
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
+#include "replication/decode.h"
 #include "postmaster/bgworker.h"
 #include "replication/logical.h"
 #include "storage/buffile.h"
 #include "storage/lock.h"
-#include "storage/relfilelocator.h"
 #include "storage/shm_mq.h"
 #include "utils/relcache.h"
 #include "utils/resowner.h"
@@ -47,8 +47,6 @@ typedef struct ClusterParams
  * The following definitions are used by REPACK CONCURRENTLY.
  */
 
-extern RelFileLocator repacked_rel_locator;
-extern RelFileLocator repacked_rel_toast_locator;
 extern PGDLLIMPORT int repack_blocks_per_snapshot;
 
 /*
@@ -169,6 +167,9 @@ extern void finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 							 TransactionId frozenXid,
 							 MultiXactId cutoffMulti,
 							 char newrelpersistence);
+
+extern bool am_decoding_for_repack(void);
+extern bool change_useless_for_repack(XLogRecordBuffer *buf);
 extern void repack_get_concurrent_changes(struct ConcurrentChangeContext *ctx,
 										  XLogRecPtr end_of_wal,
 										  BlockNumber range_end,

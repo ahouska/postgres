@@ -469,86 +469,13 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	SnapBuild  *builder = ctx->snapshot_builder;
 
 	/*
-	 * If the change is not intended for logical decoding, do not even
-	 * establish transaction for it - REPACK CONCURRENTLY is the typical use
-	 * case.
-	 *
-	 * First, check if REPACK CONCURRENTLY is being performed by this backend.
-	 * If so, only decode data changes of the table that it is processing, and
-	 * the changes of its TOAST relation.
-	 *
-	 * (TOAST locator should not be set unless the main is.)
+	 * XXX Should we return here if change_useless_for_repack() returns true,
+	 * instead of calling the function below? Unlike the fast-forward case, we
+	 * shouldn't need the base snapshot for the containing transaction until
+	 * we receive a change that belongs to the table being REPACKed. Thus it
+	 * should be fine to skip SnapBuildProcessChange(), and therefore
+	 * reorderbuffer.c can create the transaction later.
 	 */
-	Assert(!OidIsValid(repacked_rel_toast_locator.relNumber) ||
-		   OidIsValid(repacked_rel_locator.relNumber));
-
-	if (OidIsValid(repacked_rel_locator.relNumber))
-	{
-		XLogReaderState *r = buf->record;
-		RelFileLocator locator;
-
-		/* Not all records contain the block. */
-		if (XLogRecGetBlockTagExtended(r, 0, &locator, NULL, NULL, NULL) &&
-			!RelFileLocatorEquals(locator, repacked_rel_locator) &&
-			(!OidIsValid(repacked_rel_toast_locator.relNumber) ||
-			 !RelFileLocatorEquals(locator, repacked_rel_toast_locator)))
-			return;
-	}
-
-	/*
-	 * Second, skip records which do not contain sufficient information for
-	 * the decoding.
-	 *
-	 * The problem we solve here is that REPACK CONCURRENTLY generates WAL
-	 * when doing changes in the new table. Those changes should not be useful
-	 * for any other user (such as logical replication subscription) because
-	 * the new table will eventually be dropped (after REPACK CONCURRENTLY has
-	 * assigned its file to the "old table").
-	 */
-	switch (info)
-	{
-		case XLOG_HEAP_INSERT:
-			{
-				xl_heap_insert *rec;
-
-				rec = (xl_heap_insert *) XLogRecGetData(buf->record);
-
-				/*
-				 * This does happen when 1) raw_heap_insert marks the TOAST
-				 * record as HEAP_INSERT_NO_LOGICAL, 2) REPACK CONCURRENTLY
-				 * replays inserts performed by other backends.
-				 */
-				if ((rec->flags & XLH_INSERT_CONTAINS_NEW_TUPLE) == 0)
-					return;
-
-				break;
-			}
-
-		case XLOG_HEAP_HOT_UPDATE:
-		case XLOG_HEAP_UPDATE:
-			{
-				xl_heap_update *rec;
-
-				rec = (xl_heap_update *) XLogRecGetData(buf->record);
-				if ((rec->flags &
-					 (XLH_UPDATE_CONTAINS_NEW_TUPLE |
-					  XLH_UPDATE_CONTAINS_OLD_TUPLE |
-					  XLH_UPDATE_CONTAINS_OLD_KEY)) == 0)
-					return;
-
-				break;
-			}
-
-		case XLOG_HEAP_DELETE:
-			{
-				xl_heap_delete *rec;
-
-				rec = (xl_heap_delete *) XLogRecGetData(buf->record);
-				if (rec->flags & XLH_DELETE_NO_LOGICAL)
-					return;
-				break;
-			}
-	}
 
 	ReorderBufferProcessXid(ctx->reorder, xid, buf->origptr);
 
@@ -567,7 +494,8 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeInsert(ctx, buf);
 			break;
 
@@ -579,20 +507,22 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		case XLOG_HEAP_HOT_UPDATE:
 		case XLOG_HEAP_UPDATE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeUpdate(ctx, buf);
 			break;
 
 		case XLOG_HEAP_DELETE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeDelete(ctx, buf);
 			break;
 
 		case XLOG_HEAP_TRUNCATE:
 			/* Is REPACK (CONCURRENTLY) being run by this backend? */
-			if (OidIsValid(repacked_rel_locator.relNumber))
-
+			if (am_decoding_for_repack())
+			{
 				/*
 				 * TRUNCATE changes rd_locator of the relation, so it'd break
 				 * REPACK (CONCURRENTLY). In fact it should not happen because
@@ -601,6 +531,7 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 				 */
 				ereport(ERROR,
 						(errmsg("TRUNCATE encountered while doing REPACK (CONCURRENTLY)")));
+			}
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
 				!ctx->fast_forward)
 				DecodeTruncate(ctx, buf);
@@ -1030,7 +961,7 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	 * REPACK (CONCURRENTLY) needs block number to check if the corresponding
 	 * part of the table was already copied.
 	 */
-	if (OidIsValid(repacked_rel_locator.relNumber))
+	if (am_decoding_for_repack())
 		/* offnum is not really needed, but let's set valid pointer. */
 		ItemPointerSet(&change->data.tp.newtuple->t_self, blknum,
 					   xlrec->offnum);
@@ -1092,7 +1023,7 @@ DecodeUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		 * REPACK (CONCURRENTLY) needs block number to check if the
 		 * corresponding part of the table was already copied.
 		 */
-		if (OidIsValid(repacked_rel_locator.relNumber))
+		if (am_decoding_for_repack())
 			/* offnum is not really needed, but let's set valid pointer. */
 			ItemPointerSet(&change->data.tp.newtuple->t_self,
 						   new_blknum, xlrec->new_offnum);
@@ -1119,7 +1050,7 @@ DecodeUpdate(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 		DecodeXLogTuple(data, datalen, change->data.tp.oldtuple);
 		/* See above. */
-		if (OidIsValid(repacked_rel_locator.relNumber))
+		if (am_decoding_for_repack())
 			ItemPointerSet(&change->data.tp.oldtuple->t_self,
 						   old_blknum, xlrec->old_offnum);
 
@@ -1146,6 +1077,15 @@ DecodeDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	BlockNumber blknum;
 
 	xlrec = (xl_heap_delete *) XLogRecGetData(r);
+
+	/*
+	 * Ignore changes which are considered useless for logical
+	 * decoding. Currently such changes are created by REPACK (CONCURRENTLY)
+	 * when replays DELETE commands on the new table (which is not yet visible
+	 * to other transactions).
+	 */
+	if (xlrec->flags & XLH_DELETE_NO_LOGICAL)
+		return;
 
 	/* only interested in our database */
 	XLogRecGetBlockTag(r, 0, &target_locator, NULL, &blknum);
@@ -1185,7 +1125,7 @@ DecodeDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		 * REPACK (CONCURRENTLY) needs block number to check if the
 		 * corresponding part of the table was already copied.
 		 */
-		if (OidIsValid(repacked_rel_locator.relNumber))
+		if (am_decoding_for_repack())
 			/* offnum is not really needed, but let's set valid pointer. */
 			ItemPointerSet(&change->data.tp.oldtuple->t_self, blknum,
 						   xlrec->offnum);

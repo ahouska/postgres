@@ -108,8 +108,8 @@ typedef struct
  * The locators are used to avoid logical decoding of data that we do not need
  * for our table.
  */
-RelFileLocator repacked_rel_locator = {.relNumber = InvalidOid};
-RelFileLocator repacked_rel_toast_locator = {.relNumber = InvalidOid};
+static RelFileLocator repacked_rel_locator = {.relNumber = InvalidOid};
+static RelFileLocator repacked_rel_toast_locator = {.relNumber = InvalidOid};
 
 /* The WAL segment being decoded. */
 static XLogSegNo repack_current_segment = 0;
@@ -2524,6 +2524,59 @@ RepackCommandAsString(RepackCommand cmd)
 }
 
 /*
+ * Is this backend performing logical decoding on behalf of REPACK
+ * (CONCURRENTLY) ?
+ */
+bool
+am_decoding_for_repack(void)
+{
+	return OidIsValid(repacked_rel_locator.relNumber);
+}
+
+/*
+ * Does the WAL record contain a data change that this backend does not need
+ * to decode on behalf of REPACK (CONCURRENT)?
+ */
+bool
+change_useless_for_repack(XLogRecordBuffer *buf)
+{
+	XLogReaderState *r = buf->record;
+	RelFileLocator locator;
+
+	/* TOAST locator should not be set unless the main is. */
+	Assert(!OidIsValid(repacked_rel_toast_locator.relNumber) ||
+		   OidIsValid(repacked_rel_locator.relNumber));
+
+	/*
+	 * Backends not involved in REPACK (CONCURRENTLY) should not do the
+	 * filtering.
+	 */
+	if (!am_decoding_for_repack())
+		return false;
+
+	/*
+	 * If the record does not contain the block 0, it's probably not INSERT /
+	 * UPDATE / DELETE. In any case, we do not have enough information to
+	 * filter the change out.
+	 */
+	if (!XLogRecGetBlockTagExtended(r, 0, &locator, NULL, NULL, NULL))
+		return false;
+
+	/*
+	 * Decode the change if it belongs to the table we are repacking, or if it
+	 * belongs to its TOAST relation.
+	 */
+	if (RelFileLocatorEquals(locator, repacked_rel_locator))
+		return false;
+	if (OidIsValid(repacked_rel_toast_locator.relNumber) &&
+		RelFileLocatorEquals(locator, repacked_rel_toast_locator))
+		return false;
+
+	/* Filter out changes of other tables. */
+	return true;
+}
+
+/*
  * This function is much like pg_create_logical_replication_slot() except that
  * the new slot is neither released (if anyone else could read changes from
  * our slot, we could miss changes other backends do while we copy the
@@ -2759,7 +2812,8 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 			 */
 			if (XLogRecPtrIsInvalid(lsn_upto))
 				timeout = 100L;
-			res = WaitForLSN(WAIT_LSN_TYPE_FLUSH, ctx->reader->EndRecPtr + 1,
+			res = WaitForLSN(WAIT_LSN_TYPE_PRIMARY_FLUSH,
+							 ctx->reader->EndRecPtr + 1,
 							 timeout);
 			if (res != WAIT_LSN_RESULT_SUCCESS &&
 				res != WAIT_LSN_RESULT_TIMEOUT)

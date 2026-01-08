@@ -2959,9 +2959,6 @@ XLogFlush(XLogRecPtr record)
 	 * remain consistent.
 	 */
 	Assert(!XLogNeedsFlush(record));
-
-	/* Wake up waiters. */
-	WaitLSNWakeup(WAIT_LSN_TYPE_FLUSH, LogwrtResult.Flush);
 }
 
 /*

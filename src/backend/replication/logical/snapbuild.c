@@ -1039,7 +1039,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 	/*
 	 * Is REPACKED (CONCURRENTLY) is being run by this backend?
 	 */
-	else if (OidIsValid(repacked_rel_locator.relNumber))
+	else if (am_decoding_for_repack())
 	{
 		Assert(builder->building_full_snapshot);
 
