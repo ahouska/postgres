@@ -2829,16 +2829,12 @@ static void
 apply_concurrent_changes(ConcurrentChangeContext *ctx)
 {
 	DecodingWorkerShared *shared;
-	ListCell   *lc;
 
 	shared = (DecodingWorkerShared *) dsm_segment_address(decoding_worker->seg);
 
-	foreach(lc, ctx->block_ranges)
+	foreach_ptr(RepackApplyRange, range, ctx->block_ranges)
 	{
-		RepackApplyRange *range;
 		BufFile    *file;
-
-		range = (RepackApplyRange *) lfirst(lc);
 
 		file = BufFileOpenFileSet(&shared->sfs.fs, range->fname, O_RDONLY,
 								  false);
@@ -3578,12 +3574,10 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	 */
 	ind_refs_p = ind_refs = palloc_array(Relation, list_length(ind_oids_old));
 	nind = 0;
-	foreach(lc, ind_oids_old)
+	foreach_oid(ind_oid, ind_oids_old)
 	{
-		Oid			ind_oid;
 		Relation	index;
 
-		ind_oid = lfirst_oid(lc);
 		index = index_open(ind_oid, AccessExclusiveLock);
 
 		/*
@@ -3735,16 +3729,14 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 static List *
 build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 {
-	ListCell   *lc;
 	List	   *result = NIL;
 
 	pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 								 PROGRESS_REPACK_PHASE_REBUILD_INDEX);
 
-	foreach(lc, OldIndexes)
+	foreach_oid(ind_oid, OldIndexes)
 	{
-		Oid			ind_oid,
-					ind_oid_new;
+		Oid			ind_oid_new;
 		char	   *newName;
 		Relation	ind;
 
@@ -3765,7 +3757,6 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		InvalidateCatalogSnapshot();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		ind_oid = lfirst_oid(lc);
 		ind = index_open(ind_oid, ShareUpdateExclusiveLock);
 
 		newName = ChooseRelationName(get_rel_name(ind_oid),
