@@ -376,7 +376,15 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	{
 		rel = process_single_relation(stmt, lockmode, isTopLevel, &params);
 		if (rel == NULL)
+		{
+			/*
+			 * The original transaction was committed, so the current
+			 * portal will not pop the active snapshot.
+			 */
+			PopActiveSnapshot();
+
 			return;				/* all done */
+		}
 	}
 
 	/*
@@ -2357,6 +2365,8 @@ cluster_is_permitted_for_relation(RepackCommand cmd, Oid relid, Oid userid)
  * instead return the opened and locked relcache entry, so that caller can
  * process the partitions using the multiple-table handling code.  In this
  * case, if an index name is given, it's up to the caller to resolve it.
+ *
+ * A new transaction is started in either case.
  */
 static Relation
 process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
@@ -2368,6 +2378,25 @@ process_single_relation(RepackStmt *stmt, LOCKMODE lockmode, bool isTopLevel,
 	Assert(stmt->relation != NULL);
 	Assert(stmt->command == REPACK_COMMAND_CLUSTER ||
 		   stmt->command == REPACK_COMMAND_REPACK);
+
+	/*
+	 * Since REPACK (CONCURRENTLY) pops the active snapshot during the
+	 * processing (it creates and pushes snapshots on its own), and since that
+	 * snapshot can be referenced by the current portal, we need to make sure
+	 * that the portal has no dangling pointer to the snapshot. Starting a new
+	 * transaction seems to be the simplest way.
+	 */
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+
+	/* Start a new transaction. */
+	StartTransactionCommand();
+
+	/*
+	 * Functions in indexes may want a snapshot set. Note that the portal is
+	 * not aware of this one, so the caller needs to pop it explicitly.
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	/* Find, lock, and check permissions on the table. */
 	tableOid = RangeVarGetRelidExtended(stmt->relation->relation,
