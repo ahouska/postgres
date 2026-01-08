@@ -3,7 +3,7 @@
  * pg_createsubscriber.c
  *	  Create a new logical replica from a standby server
  *
- * Copyright (c) 2024-2025, PostgreSQL Global Development Group
+ * Copyright (c) 2024-2026, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/bin/pg_basebackup/pg_createsubscriber.c
@@ -20,6 +20,7 @@
 
 #include "common/connect.h"
 #include "common/controldata_utils.h"
+#include "common/file_utils.h"
 #include "common/logging.h"
 #include "common/pg_prng.h"
 #include "common/restricted_token.h"
@@ -32,6 +33,21 @@
 
 #define	DEFAULT_SUB_PORT	"50432"
 #define	OBJECTTYPE_PUBLICATIONS  0x0001
+
+/*
+ * Configuration files for recovery parameters.
+ *
+ * The recovery parameters are set in INCLUDED_CONF_FILE, itself loaded by
+ * the server through an include_if_exists in postgresql.auto.conf.
+ *
+ * INCLUDED_CONF_FILE is renamed to INCLUDED_CONF_FILE_DISABLED when exiting,
+ * so as the recovery parameters set by this tool never take effect on node
+ * restart.  The contents of INCLUDED_CONF_FILE_DISABLED can be useful for
+ * debugging.
+ */
+#define PG_AUTOCONF_FILENAME		"postgresql.auto.conf"
+#define INCLUDED_CONF_FILE			"pg_createsubscriber.conf"
+#define INCLUDED_CONF_FILE_DISABLED	INCLUDED_CONF_FILE ".disabled"
 
 /* Command-line options */
 struct CreateSubscriberOptions
@@ -116,6 +132,7 @@ static void stop_standby_server(const char *datadir);
 static void wait_for_end_recovery(const char *conninfo,
 								  const struct CreateSubscriberOptions *opt);
 static void create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo);
+static bool find_publication(PGconn *conn, const char *pubname, const char *dbname);
 static void drop_publication(PGconn *conn, const char *pubname,
 							 const char *dbname, bool *made_publication);
 static void check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo);
@@ -155,22 +172,43 @@ static char *subscriber_dir = NULL;
 
 static bool recovery_ended = false;
 static bool standby_running = false;
+static bool recovery_params_set = false;
 
 
 /*
- * Cleanup objects that were created by pg_createsubscriber if there is an
- * error.
+ * Clean up objects created by pg_createsubscriber.
  *
- * Publications and replication slots are created on primary. Depending on the
- * step it failed, it should remove the already created objects if it is
- * possible (sometimes it won't work due to a connection issue).
- * There is no cleanup on the target server. The steps on the target server are
- * executed *after* promotion, hence, at this point, a failure means recreate
- * the physical replica and start again.
+ * Publications and replication slots are created on the primary.  Depending
+ * on the step where it failed, already-created objects should be removed if
+ * possible (sometimes this won't work due to a connection issue).
+ * There is no cleanup on the target server *after* its promotion, because any
+ * failure at this point means recreating the physical replica and starting
+ * again.
+ *
+ * The recovery configuration is always removed, by renaming the included
+ * configuration file out of the way.
  */
 static void
 cleanup_objects_atexit(void)
 {
+	/* Rename the included configuration file, if necessary. */
+	if (recovery_params_set)
+	{
+		char		conf_filename[MAXPGPATH];
+		char		conf_filename_disabled[MAXPGPATH];
+
+		snprintf(conf_filename, MAXPGPATH, "%s/%s", subscriber_dir,
+				 INCLUDED_CONF_FILE);
+		snprintf(conf_filename_disabled, MAXPGPATH, "%s/%s", subscriber_dir,
+				 INCLUDED_CONF_FILE_DISABLED);
+
+		if (durable_rename(conf_filename, conf_filename_disabled) != 0)
+		{
+			/* durable_rename() has already logged something. */
+			pg_log_warning_hint("A manual removal of the recovery parameters may be required.");
+		}
+	}
+
 	if (success)
 		return;
 
@@ -764,6 +802,39 @@ generate_object_name(PGconn *conn)
 }
 
 /*
+ * Does the publication exist in the specified database?
+ */
+static bool
+find_publication(PGconn *conn, const char *pubname, const char *dbname)
+{
+	PQExpBuffer str = createPQExpBuffer();
+	PGresult   *res;
+	bool		found = false;
+	char	   *pubname_esc = PQescapeLiteral(conn, pubname, strlen(pubname));
+
+	appendPQExpBuffer(str,
+					  "SELECT 1 FROM pg_catalog.pg_publication "
+					  "WHERE pubname = %s",
+					  pubname_esc);
+	res = PQexec(conn, str->data);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		pg_log_error("could not find publication \"%s\" in database \"%s\": %s",
+					 pubname, dbname, PQerrorMessage(conn));
+		disconnect_database(conn, true);
+	}
+
+	if (PQntuples(res) == 1)
+		found = true;
+
+	PQclear(res);
+	PQfreemem(pubname_esc);
+	destroyPQExpBuffer(str);
+
+	return found;
+}
+
+/*
  * Create the publications and replication slots in preparation for logical
  * replication. Returns the LSN from latest replication slot. It will be the
  * replication start point that is used to adjust the subscriptions (see
@@ -799,13 +870,25 @@ setup_publisher(struct LogicalRepInfo *dbinfo)
 		if (num_replslots == 0)
 			dbinfo[i].replslotname = pg_strdup(dbinfo[i].subname);
 
-		/*
-		 * Create publication on publisher. This step should be executed
-		 * *before* promoting the subscriber to avoid any transactions between
-		 * consistent LSN and the new publication rows (such transactions
-		 * wouldn't see the new publication rows resulting in an error).
-		 */
-		create_publication(conn, &dbinfo[i]);
+		if (find_publication(conn, dbinfo[i].pubname, dbinfo[i].dbname))
+		{
+			/* Reuse existing publication on publisher. */
+			pg_log_info("use existing publication \"%s\" in database \"%s\"",
+						dbinfo[i].pubname, dbinfo[i].dbname);
+			/* Don't remove pre-existing publication if an error occurs. */
+			dbinfo[i].made_publication = false;
+		}
+		else
+		{
+			/*
+			 * Create publication on publisher. This step should be executed
+			 * *before* promoting the subscriber to avoid any transactions
+			 * between consistent LSN and the new publication rows (such
+			 * transactions wouldn't see the new publication rows resulting in
+			 * an error).
+			 */
+			create_publication(conn, &dbinfo[i]);
+		}
 
 		/* Create replication slot on publisher */
 		if (lsn)
@@ -907,7 +990,7 @@ check_publisher(const struct LogicalRepInfo *dbinfo)
 	 * Since these parameters are not a requirement for physical replication,
 	 * we should check it to make sure it won't fail.
 	 *
-	 * - wal_level = logical
+	 * - wal_level >= replica
 	 * - max_replication_slots >= current + number of dbs to be converted
 	 * - max_wal_senders >= current + number of dbs to be converted
 	 * - max_slot_wal_keep_size = -1 (to prevent deletion of required WAL files)
@@ -951,9 +1034,9 @@ check_publisher(const struct LogicalRepInfo *dbinfo)
 
 	disconnect_database(conn, false);
 
-	if (strcmp(wal_level, "logical") != 0)
+	if (strcmp(wal_level, "minimal") == 0)
 	{
-		pg_log_error("publisher requires \"wal_level\" >= \"logical\"");
+		pg_log_error("publisher requires \"wal_level\" >= \"replica\"");
 		failed = true;
 	}
 
@@ -1288,11 +1371,36 @@ setup_recovery(const struct LogicalRepInfo *dbinfo, const char *datadir, const c
 	{
 		appendPQExpBuffer(recoveryconfcontents, "recovery_target_lsn = '%s'\n",
 						  lsn);
-		WriteRecoveryConfig(conn, datadir, recoveryconfcontents);
 	}
-	disconnect_database(conn, false);
 
 	pg_log_debug("recovery parameters:\n%s", recoveryconfcontents->data);
+
+	if (!dry_run)
+	{
+		char		conf_filename[MAXPGPATH];
+		FILE	   *fd;
+
+		/* Write the recovery parameters to INCLUDED_CONF_FILE */
+		snprintf(conf_filename, MAXPGPATH, "%s/%s", datadir,
+				 INCLUDED_CONF_FILE);
+		fd = fopen(conf_filename, "w");
+		if (fd == NULL)
+			pg_fatal("could not open file \"%s\": %m", conf_filename);
+
+		if (fwrite(recoveryconfcontents->data, recoveryconfcontents->len, 1, fd) != 1)
+			pg_fatal("could not write to file \"%s\": %m", conf_filename);
+
+		fclose(fd);
+		recovery_params_set = true;
+
+		/* Include conditionally the recovery parameters. */
+		resetPQExpBuffer(recoveryconfcontents);
+		appendPQExpBufferStr(recoveryconfcontents,
+							 "include_if_exists '" INCLUDED_CONF_FILE "'\n");
+		WriteRecoveryConfig(conn, datadir, recoveryconfcontents);
+	}
+
+	disconnect_database(conn, false);
 }
 
 /*
@@ -1749,11 +1857,10 @@ drop_publication(PGconn *conn, const char *pubname, const char *dbname,
 /*
  * Retrieve and drop the publications.
  *
- * Since the publications were created before the consistent LSN, they
- * remain on the subscriber even after the physical replica is
- * promoted. Remove these publications from the subscriber because
- * they have no use. Additionally, if requested, drop all pre-existing
- * publications.
+ * Publications copied during physical replication remain on the subscriber
+ * after promotion. If --clean=publications is specified, drop all existing
+ * publications in the subscriber database. Otherwise, only drop publications
+ * that were created by pg_createsubscriber during this operation.
  */
 static void
 check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo)
@@ -1785,14 +1892,24 @@ check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 		PQclear(res);
 	}
-
-	/*
-	 * In dry-run mode, we don't create publications, but we still try to drop
-	 * those to provide necessary information to the user.
-	 */
-	if (!drop_all_pubs || dry_run)
-		drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
-						 &dbinfo->made_publication);
+	else
+	{
+		/* Drop publication only if it was created by this tool */
+		if (dbinfo->made_publication)
+		{
+			drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
+							 &dbinfo->made_publication);
+		}
+		else
+		{
+			if (dry_run)
+				pg_log_info("dry-run: would preserve existing publication \"%s\" in database \"%s\"",
+							dbinfo->pubname, dbinfo->dbname);
+			else
+				pg_log_info("preserve existing publication \"%s\" in database \"%s\"",
+							dbinfo->pubname, dbinfo->dbname);
+		}
+	}
 }
 
 /*

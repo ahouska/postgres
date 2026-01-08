@@ -3,7 +3,7 @@
  * genam.c
  *	  general index access method routines
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -781,10 +781,11 @@ systable_endscan_ordered(SysScanDesc sysscan)
  * systable_inplace_update_begin --- update a row "in place" (overwrite it)
  *
  * Overwriting violates both MVCC and transactional safety, so the uses of
- * this function in Postgres are extremely limited.  Nonetheless we find some
- * places to use it.  See README.tuplock section "Locking to write
- * inplace-updated tables" and later sections for expectations of readers and
- * writers of a table that gets inplace updates.  Standard flow:
+ * this function in Postgres are extremely limited.  This makes no effort to
+ * support updating cache key columns or other indexed columns.  Nonetheless
+ * we find some places to use it.  See README.tuplock section "Locking to
+ * write inplace-updated tables" and later sections for expectations of
+ * readers and writers of a table that gets inplace updates.  Standard flow:
  *
  * ... [any slow preparation not requiring oldtup] ...
  * systable_inplace_update_begin([...], &tup, &inplace_state);

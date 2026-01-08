@@ -9,7 +9,7 @@
  *	  polluting the namespace with lots of stuff...
  *
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/c.h
@@ -569,6 +569,7 @@ typedef uint32 bits32;			/* >= 32 bits */
 /* snprintf format strings to use for 64-bit integers */
 #define INT64_FORMAT "%" PRId64
 #define UINT64_FORMAT "%" PRIu64
+#define OID8_FORMAT "%" PRIu64
 
 /*
  * 128-bit signed and unsigned integers
@@ -655,7 +656,7 @@ typedef double float8;
 #define FLOAT8PASSBYVAL true
 
 /*
- * Oid, RegProcedure, TransactionId, SubTransactionId, MultiXactId,
+ * Oid, Oid8, RegProcedure, TransactionId, SubTransactionId, MultiXactId,
  * CommandId
  */
 
@@ -687,6 +688,11 @@ typedef uint32 CommandId;
 #define FirstCommandId	((CommandId) 0)
 #define InvalidCommandId	(~(CommandId)0)
 
+/* 8-byte Object ID */
+typedef uint64 Oid8;
+
+#define InvalidOid8		((Oid8) 0)
+#define OID8_MAX	UINT64_MAX
 
 /* ----------------
  *		Variable-length datatypes all share the 'struct varlena' header.
@@ -786,6 +792,8 @@ typedef NameData *Name;
 		((void *)((char *) base + offset))
 
 #define OidIsValid(objectId)  ((bool) ((objectId) != InvalidOid))
+
+#define Oid8IsValid(objectId)  ((bool) ((objectId) != InvalidOid8))
 
 #define RegProcedureIsValid(p)	OidIsValid(p)
 
@@ -923,52 +931,31 @@ pg_noreturn extern void ExceptionalCondition(const char *conditionName,
  * If the "condition" (a compile-time-constant expression) evaluates to false,
  * throw a compile error using the "errmessage" (a string literal).
  *
- * C11 has _Static_assert(), and most C99 compilers already support that.  For
- * portability, we wrap it into StaticAssertDecl().  _Static_assert() is a
- * "declaration", and so it must be placed where for example a variable
+ * We require C11 and C++11, so static_assert() is expected to be there.
+ * StaticAssertDecl() was previously used for portability, but it's now just a
+ * plain wrapper and doesn't need to be used in new code.  static_assert() is
+ * a "declaration", and so it must be placed where for example a variable
  * declaration would be valid.  As long as we compile with
  * -Wno-declaration-after-statement, that also means it cannot be placed after
  * statements in a function.  Macros StaticAssertStmt() and StaticAssertExpr()
  * make it safe to use as a statement or in an expression, respectively.
  *
- * For compilers without _Static_assert(), we fall back on a kluge that
- * assumes the compiler will complain about a negative width for a struct
+ * For compilers without GCC statement expressions, we fall back on a kluge
+ * that assumes the compiler will complain about a negative width for a struct
  * bit-field.  This will not include a helpful error message, but it beats not
  * getting an error at all.
  */
-#ifndef __cplusplus
-#ifdef HAVE__STATIC_ASSERT
 #define StaticAssertDecl(condition, errmessage) \
-	_Static_assert(condition, errmessage)
+	static_assert(condition, errmessage)
 #define StaticAssertStmt(condition, errmessage) \
-	do { _Static_assert(condition, errmessage); } while(0)
+	do { static_assert(condition, errmessage); } while(0)
+#ifdef HAVE_STATEMENT_EXPRESSIONS
 #define StaticAssertExpr(condition, errmessage) \
-	((void) ({ StaticAssertStmt(condition, errmessage); true; }))
-#else							/* !HAVE__STATIC_ASSERT */
-#define StaticAssertDecl(condition, errmessage) \
-	extern void static_assert_func(int static_assert_failure[(condition) ? 1 : -1])
-#define StaticAssertStmt(condition, errmessage) \
+	((void) ({ static_assert(condition, errmessage); true; }))
+#else
+#define StaticAssertExpr(condition, errmessage) \
 	((void) sizeof(struct { int static_assert_failure : (condition) ? 1 : -1; }))
-#define StaticAssertExpr(condition, errmessage) \
-	StaticAssertStmt(condition, errmessage)
-#endif							/* HAVE__STATIC_ASSERT */
-#else							/* C++ */
-#if defined(__cpp_static_assert) && __cpp_static_assert >= 200410
-#define StaticAssertDecl(condition, errmessage) \
-	static_assert(condition, errmessage)
-#define StaticAssertStmt(condition, errmessage) \
-	static_assert(condition, errmessage)
-#define StaticAssertExpr(condition, errmessage) \
-	({ static_assert(condition, errmessage); })
-#else							/* !__cpp_static_assert */
-#define StaticAssertDecl(condition, errmessage) \
-	extern void static_assert_func(int static_assert_failure[(condition) ? 1 : -1])
-#define StaticAssertStmt(condition, errmessage) \
-	do { struct static_assert_struct { int static_assert_failure : (condition) ? 1 : -1; }; } while(0)
-#define StaticAssertExpr(condition, errmessage) \
-	((void) ({ StaticAssertStmt(condition, errmessage); }))
-#endif							/* __cpp_static_assert */
-#endif							/* C++ */
+#endif							/* HAVE_STATEMENT_EXPRESSIONS */
 
 
 /*
@@ -1283,7 +1270,7 @@ typedef struct PGAlignedXLogBlock
  */
 
 #if !HAVE_DECL_FDATASYNC
-extern int	fdatasync(int fildes);
+extern int	fdatasync(int fd);
 #endif
 
 /*

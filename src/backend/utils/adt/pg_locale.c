@@ -2,7 +2,7 @@
  *
  * PostgreSQL locale utilities
  *
- * Portions Copyright (c) 2002-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2002-2026, PostgreSQL Global Development Group
  *
  * src/backend/utils/adt/pg_locale.c
  *
@@ -32,6 +32,9 @@
 #include "postgres.h"
 
 #include <time.h>
+#ifdef USE_ICU
+#include <unicode/ucol.h>
+#endif
 
 #include "access/htup_details.h"
 #include "catalog/pg_collation.h"
@@ -1353,6 +1356,26 @@ pg_strfold(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 }
 
 /*
+ * Lowercase an identifier using the database default locale.
+ *
+ * For historical reasons, does not use ordinary locale behavior. Should only
+ * be used for identifiers. XXX: can we make this equivalent to
+ * pg_strfold(..., default_locale)?
+ */
+size_t
+pg_downcase_ident(char *dst, size_t dstsize, const char *src, ssize_t srclen)
+{
+	pg_locale_t locale = default_locale;
+
+	if (locale == NULL || locale->ctype == NULL ||
+		locale->ctype->downcase_ident == NULL)
+		return strlower_c(dst, dstsize, src, srclen);
+	else
+		return locale->ctype->downcase_ident(dst, dstsize, src, srclen,
+											 locale);
+}
+
+/*
  * pg_strcoll
  *
  * Like pg_strncoll for NUL-terminated input strings.
@@ -1625,19 +1648,15 @@ pg_towlower(pg_wchar wc, pg_locale_t locale)
 		return locale->ctype->wc_tolower(wc, locale);
 }
 
-/*
- * char_is_cased()
- *
- * Fuzzy test of whether the given char is case-varying or not. The argument
- * is a single byte, so in a multibyte encoding, just assume any non-ASCII
- * char is case-varying.
- */
-bool
-char_is_cased(char ch, pg_locale_t locale)
+/* version of Unicode used by ICU */
+const char *
+pg_icu_unicode_version()
 {
-	if (locale->ctype == NULL)
-		return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
-	return locale->ctype->char_is_cased(ch, locale);
+#ifdef USE_ICU
+	return U_UNICODE_VERSION;
+#else
+	return NULL;
+#endif
 }
 
 /*

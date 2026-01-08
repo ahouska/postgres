@@ -3,7 +3,7 @@
  * heapam_xlog.c
  *	  WAL replay logic for heap access method.
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -191,7 +191,7 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 	 * unlogged and maintained heuristically, it often becomes stale on
 	 * standbys. If such a standby is later promoted and runs VACUUM, it will
 	 * skip recalculating free space for pages that were marked
-	 * all-visible/all-forzen. FreeSpaceMapVacuum() can then propagate overly
+	 * all-visible/all-frozen. FreeSpaceMapVacuum() can then propagate overly
 	 * optimistic free space values upward, causing future insertions to
 	 * select pages that turn out to be unusable. In bulk, this can lead to
 	 * long stalls.
@@ -422,7 +422,7 @@ heap_xlog_delete(XLogReaderState *record)
 	xl_heap_delete *xlrec = (xl_heap_delete *) XLogRecGetData(record);
 	Buffer		buffer;
 	Page		page;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleHeader htup;
 	BlockNumber blkno;
 	RelFileLocator target_locator;
@@ -451,10 +451,10 @@ heap_xlog_delete(XLogReaderState *record)
 	{
 		page = BufferGetPage(buffer);
 
-		if (PageGetMaxOffsetNumber(page) >= xlrec->offnum)
-			lp = PageGetItemId(page, xlrec->offnum);
-
-		if (PageGetMaxOffsetNumber(page) < xlrec->offnum || !ItemIdIsNormal(lp))
+		if (xlrec->offnum < 1 || xlrec->offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, xlrec->offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);
@@ -817,7 +817,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 				nbuffer;
 	Page		page;
 	OffsetNumber offnum;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleData oldtup;
 	HeapTupleHeader htup;
 	uint16		prefixlen = 0,
@@ -881,10 +881,10 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 	{
 		page = BufferGetPage(obuffer);
 		offnum = xlrec->old_offnum;
-		if (PageGetMaxOffsetNumber(page) >= offnum)
-			lp = PageGetItemId(page, offnum);
-
-		if (PageGetMaxOffsetNumber(page) < offnum || !ItemIdIsNormal(lp))
+		if (offnum < 1 || offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);
@@ -1087,7 +1087,7 @@ heap_xlog_confirm(XLogReaderState *record)
 	Buffer		buffer;
 	Page		page;
 	OffsetNumber offnum;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleHeader htup;
 
 	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
@@ -1095,10 +1095,10 @@ heap_xlog_confirm(XLogReaderState *record)
 		page = BufferGetPage(buffer);
 
 		offnum = xlrec->offnum;
-		if (PageGetMaxOffsetNumber(page) >= offnum)
-			lp = PageGetItemId(page, offnum);
-
-		if (PageGetMaxOffsetNumber(page) < offnum || !ItemIdIsNormal(lp))
+		if (offnum < 1 || offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);
@@ -1126,7 +1126,7 @@ heap_xlog_lock(XLogReaderState *record)
 	Buffer		buffer;
 	Page		page;
 	OffsetNumber offnum;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleHeader htup;
 
 	/*
@@ -1155,10 +1155,10 @@ heap_xlog_lock(XLogReaderState *record)
 		page = BufferGetPage(buffer);
 
 		offnum = xlrec->offnum;
-		if (PageGetMaxOffsetNumber(page) >= offnum)
-			lp = PageGetItemId(page, offnum);
-
-		if (PageGetMaxOffsetNumber(page) < offnum || !ItemIdIsNormal(lp))
+		if (offnum < 1 || offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);
@@ -1200,7 +1200,7 @@ heap_xlog_lock_updated(XLogReaderState *record)
 	Buffer		buffer;
 	Page		page;
 	OffsetNumber offnum;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleHeader htup;
 
 	xlrec = (xl_heap_lock_updated *) XLogRecGetData(record);
@@ -1231,10 +1231,10 @@ heap_xlog_lock_updated(XLogReaderState *record)
 		page = BufferGetPage(buffer);
 
 		offnum = xlrec->offnum;
-		if (PageGetMaxOffsetNumber(page) >= offnum)
-			lp = PageGetItemId(page, offnum);
-
-		if (PageGetMaxOffsetNumber(page) < offnum || !ItemIdIsNormal(lp))
+		if (offnum < 1 || offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);
@@ -1263,7 +1263,7 @@ heap_xlog_inplace(XLogReaderState *record)
 	Buffer		buffer;
 	Page		page;
 	OffsetNumber offnum;
-	ItemId		lp = NULL;
+	ItemId		lp;
 	HeapTupleHeader htup;
 	uint32		oldlen;
 	Size		newlen;
@@ -1275,10 +1275,10 @@ heap_xlog_inplace(XLogReaderState *record)
 		page = BufferGetPage(buffer);
 
 		offnum = xlrec->offnum;
-		if (PageGetMaxOffsetNumber(page) >= offnum)
-			lp = PageGetItemId(page, offnum);
-
-		if (PageGetMaxOffsetNumber(page) < offnum || !ItemIdIsNormal(lp))
+		if (offnum < 1 || offnum > PageGetMaxOffsetNumber(page))
+			elog(PANIC, "offnum out of range");
+		lp = PageGetItemId(page, offnum);
+		if (!ItemIdIsNormal(lp))
 			elog(PANIC, "invalid lp");
 
 		htup = (HeapTupleHeader) PageGetItem(page, lp);

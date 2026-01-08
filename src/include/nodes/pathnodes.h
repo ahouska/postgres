@@ -6,7 +6,7 @@
  * We don't support copying RelOptInfo, IndexOptInfo, or Path nodes.
  * There are some subsidiary structs that are useful to copy, though.
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/pathnodes.h
@@ -404,7 +404,7 @@ struct PlannerInfo
 	/* list of AggClauseInfos */
 	List	   *agg_clause_list;
 
-	/* list of GroupExprInfos */
+	/* list of GroupingExprInfos */
 	List	   *group_expr_list;
 
 	/* list of plain Vars contained in targetlist and havingQual */
@@ -639,7 +639,7 @@ typedef struct PartitionSchemeData
 
 	/* Cached information about partition comparison functions. */
 	struct FmgrInfo *partsupfunc;
-}			PartitionSchemeData;
+} PartitionSchemeData;
 
 typedef struct PartitionSchemeData *PartitionScheme;
 

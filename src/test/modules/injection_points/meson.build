@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, PostgreSQL Global Development Group
+# Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 if not get_option('injection_points')
   subdir_done()
@@ -48,11 +48,7 @@ tests += {
       'repack',
       'repack_toast',
       'syscache-update-pruned',
-      'index-concurrently-upsert',
-      'index-concurrently-upsert-predicate',
-      'reindex-concurrently-upsert',
-      'reindex-concurrently-upsert-on-constraint',
-      'reindex-concurrently-upsert-partitioned',
+      'heap_lock_update',
     ],
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution

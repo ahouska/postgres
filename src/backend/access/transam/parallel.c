@@ -3,7 +3,7 @@
  * parallel.c
  *	  Infrastructure for launching parallel workers
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -508,7 +508,11 @@ InitializeParallelDSM(ParallelContext *pcxt)
 void
 ReinitializeParallelDSM(ParallelContext *pcxt)
 {
+	MemoryContext oldcontext;
 	FixedParallelState *fps;
+
+	/* We might be running in a very short-lived memory context. */
+	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
 
 	/* Wait for any old workers to exit. */
 	if (pcxt->nworkers_launched > 0)
@@ -547,6 +551,9 @@ ReinitializeParallelDSM(ParallelContext *pcxt)
 			pcxt->worker[i].error_mqh = shm_mq_attach(mq, pcxt->seg, NULL);
 		}
 	}
+
+	/* Restore previous memory context. */
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
@@ -877,7 +884,7 @@ WaitForParallelWorkersToFinish(ParallelContext *pcxt)
 				 * the worker writes messages and terminates after the
 				 * CHECK_FOR_INTERRUPTS() near the top of this function and
 				 * before the call to GetBackgroundWorkerPid().  In that case,
-				 * or latch should have been set as well and the right things
+				 * our latch should have been set as well and the right things
 				 * will happen on the next pass through the loop.
 				 */
 			}

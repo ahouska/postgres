@@ -17,11 +17,7 @@ ISOLATION = basic \
 	    repack \
 	    repack_toast \
 	    syscache-update-pruned \
-	    index-concurrently-upsert \
-	    index-concurrently-upsert-predicate \
-	    reindex-concurrently-upsert \
-	    reindex-concurrently-upsert-on-constraint \
-	    reindex-concurrently-upsert-partitioned
+	    heap_lock_update
 ISOLATION_OPTS = --temp-config $(top_srcdir)/src/test/modules/injection_points/logical.conf
 
 # The injection points are cluster-wide, so disable installcheck

@@ -29,7 +29,7 @@
  * current backend.  This function guarantees that only one backend
  * initializes the table and that all other backends just attach it.
  *
- * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -180,11 +180,13 @@ init_dsm_registry(void)
  * Initialize or attach a named DSM segment.
  *
  * This routine returns the address of the segment.  init_callback is called to
- * initialize the segment when it is first created.
+ * initialize the segment when it is first created.  'arg' is passed through to
+ * the initialization callback function.
  */
 void *
 GetNamedDSMSegment(const char *name, size_t size,
-				   void (*init_callback) (void *ptr), bool *found)
+				   void (*init_callback) (void *ptr, void *arg),
+				   bool *found, void *arg)
 {
 	DSMRegistryEntry *entry;
 	MemoryContext oldcontext;
@@ -235,7 +237,7 @@ GetNamedDSMSegment(const char *name, size_t size,
 		seg = dsm_create(size, 0);
 
 		if (init_callback)
-			(*init_callback) (dsm_segment_address(seg));
+			(*init_callback) (dsm_segment_address(seg), arg);
 
 		dsm_pin_segment(seg);
 		dsm_pin_mapping(seg);
