@@ -110,8 +110,7 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			{
 				HeapTuple	newtuple;
 
-				newtuple = change->data.tp.newtuple != NULL ?
-					change->data.tp.newtuple : NULL;
+				newtuple = change->data.tp.newtuple;
 
 				/*
 				 * Identity checks in the main function should have made this
@@ -128,10 +127,8 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				HeapTuple	oldtuple,
 							newtuple;
 
-				oldtuple = change->data.tp.oldtuple != NULL ?
-					change->data.tp.oldtuple : NULL;
-				newtuple = change->data.tp.newtuple != NULL ?
-					change->data.tp.newtuple : NULL;
+				oldtuple = change->data.tp.oldtuple;
+				newtuple = change->data.tp.newtuple;
 
 				if (newtuple == NULL)
 					elog(ERROR, "Incomplete update info.");
@@ -146,8 +143,7 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			{
 				HeapTuple	oldtuple;
 
-				oldtuple = change->data.tp.oldtuple ?
-					change->data.tp.oldtuple : NULL;
+				oldtuple = change->data.tp.oldtuple;
 
 				if (oldtuple == NULL)
 					elog(ERROR, "Incomplete delete info.");
