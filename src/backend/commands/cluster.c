@@ -275,7 +275,6 @@ static ScanKey build_identity_key(Oid ident_idx_oid, Relation rel_src,
 static void free_index_insert_state(IndexInsertState *iistate);
 static void cleanup_logical_decoding(LogicalDecodingContext *ctx);
 static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
-											   Relation cl_index,
 											   TransactionId frozenXid,
 											   MultiXactId cutoffMulti,
 											   ConcurrentChangeContext *ctx);
@@ -440,6 +439,7 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 		Assert(stmt->indexname == NULL);
 		rtcs = get_tables_to_repack(stmt->command, stmt->usingindex,
 									repack_context);
+		params.options |= CLUOPT_RECHECK_ISCLUSTERED;
 	}
 	else
 	{
@@ -1000,8 +1000,8 @@ check_repack_concurrently_requirements(Relation rel)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot process relation \"%s\"",
 						RelationGetRelationName(rel)),
-				 (errhint("Relation \"%s\" has no identity index.",
-						  RelationGetRelationName(rel)))));
+				 errhint("Relation \"%s\" has no identity index.",
+						 RelationGetRelationName(rel))));
 
 	/*
 	 * In the CONCURRENTLY mode we don't want to use the same snapshot
@@ -1126,7 +1126,15 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		UpdateActiveSnapshotCommandId();
 
 		Assert(!swap_toast_by_content);
-		rebuild_relation_finish_concurrent(NewHeap, OldHeap, index,
+
+		/*
+		 * Close the index, but keep the lock. Both heaps will be closed by
+		 * the following call.
+		 */
+		if (index)
+			index_close(index, NoLock);
+
+		rebuild_relation_finish_concurrent(NewHeap, OldHeap,
 										   frozenXid, cutoffMulti, ctx);
 
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
@@ -2520,8 +2528,9 @@ RepackCommandAsString(RepackCommand cmd)
 		case REPACK_COMMAND_CLUSTER:
 			return "CLUSTER";
 	}
-	return "???";
+	return "???";	/* keep compiler quiet */
 }
+
 
 /*
  * Is this backend performing logical decoding on behalf of REPACK
@@ -2535,7 +2544,7 @@ am_decoding_for_repack(void)
 
 /*
  * Does the WAL record contain a data change that this backend does not need
- * to decode on behalf of REPACK (CONCURRENT)?
+ * to decode on behalf of REPACK (CONCURRENTLY)?
  */
 bool
 change_useless_for_repack(XLogRecordBuffer *buf)
@@ -3067,7 +3076,6 @@ apply_concurrent_insert(Relation rel, HeapTuple tup, IndexInsertState *iistate,
 {
 	List	   *recheck;
 
-
 	/*
 	 * Like simple_heap_insert(), but make sure that the INSERT is not
 	 * logically decoded - see reform_and_rewrite_tuple() for more
@@ -3094,7 +3102,7 @@ apply_concurrent_insert(Relation rel, HeapTuple tup, IndexInsertState *iistate,
 		);
 
 	/*
-	 * If recheck is required, it must have been preformed on the source
+	 * If recheck is required, it must have been performed on the source
 	 * relation by now. (All the logical changes we process here are already
 	 * committed.)
 	 */
@@ -3203,9 +3211,6 @@ is_tuple_in_block_range(HeapTuple tup, BlockNumber start, BlockNumber end)
  * Find the tuple to be updated or deleted.
  *
  * 'tup_key' is a tuple containing the key values for the scan.
- *
- * On exit,'*scan_p' contains the scan descriptor used. The caller must close
- * it when he no longer needs the tuple returned.
  */
 static HeapTuple
 find_target_tuple(Relation rel, ConcurrentChangeContext *ctx,
@@ -3487,7 +3492,6 @@ cleanup_logical_decoding(LogicalDecodingContext *ctx)
  */
 static void
 rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
-								   Relation cl_index,
 								   TransactionId frozenXid,
 								   MultiXactId cutoffMulti,
 								   ConcurrentChangeContext *ctx)
@@ -3513,8 +3517,6 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/* Like in cluster_rel(). */
 	lockmode_old = ShareUpdateExclusiveLock;
 	Assert(CheckRelationLockedByMe(OldHeap, lockmode_old, false));
-	Assert(cl_index == NULL ||
-		   CheckRelationLockedByMe(cl_index, lockmode_old, false));
 	/* This is expected from the caller. */
 	Assert(CheckRelationLockedByMe(NewHeap, AccessExclusiveLock, false));
 
@@ -3605,20 +3607,7 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	/*
 	 * Acquire AccessExclusiveLock on the table, its TOAST relation (if there
 	 * is one), all its indexes, so that we can swap the files.
-	 *
-	 * Before that, unlock the index temporarily to avoid deadlock in case
-	 * another transaction is trying to lock it while holding the lock on the
-	 * table.
 	 */
-	if (cl_index)
-	{
-		index_close(cl_index, ShareUpdateExclusiveLock);
-		cl_index = NULL;
-	}
-	/* For the same reason, unlock TOAST relation. */
-	if (OldHeap->rd_rel->reltoastrelid)
-		LockRelationOid(OldHeap->rd_rel->reltoastrelid, AccessExclusiveLock);
-	/* Finally lock the table */
 	LockRelationOid(old_table_oid, AccessExclusiveLock);
 
 	/*
@@ -3648,8 +3637,8 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 	}
 
 	/*
-	 * In addition, lock the OldHeap's TOAST relation exclusively - again, the
-	 * lock is needed to swap the files.
+	 * Lock the OldHeap's TOAST relation exclusively - again, the lock is
+	 * needed to swap the files.
 	 */
 	if (OidIsValid(OldHeap->rd_rel->reltoastrelid))
 		LockRelationOid(OldHeap->rd_rel->reltoastrelid, AccessExclusiveLock);

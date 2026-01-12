@@ -531,6 +531,8 @@ SnapBuildMVCCFromHistoric(Snapshot snapshot, bool in_place)
 	int			newxcnt = 0;
 	Snapshot	result;
 
+	Assert(snapshot->snapshot_type == SNAPSHOT_HISTORIC_MVCC);
+
 	newxip = palloc_array(TransactionId, GetMaxSnapshotXidCount());
 
 	/*

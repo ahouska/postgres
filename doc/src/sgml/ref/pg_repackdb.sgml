@@ -108,7 +108,7 @@ PostgreSQL documentation
 
   <para>
    <application>pg_repackdb</application> is a wrapper around the SQL
-   command <link linkend="sql-repack"><command>REPACK</command></link> There
+   command <link linkend="sql-repack"><command>REPACK</command></link>. There
    is no effective difference between repacking and analyzing databases via
    this utility and via other methods for accessing the server.
   </para>

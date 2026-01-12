@@ -3,7 +3,7 @@
  * pgoutput_repack.c
  *		Logical Replication output plugin for REPACK command
  *
- * Copyright (c) 2012-2025, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2026, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/replication/pgoutput_repack/pgoutput_repack.c
@@ -156,7 +156,12 @@ plugin_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			}
 			break;
 		default:
-			/* Should not come here */
+			/*
+			 * Should not come here. This includes TRUNCATE of the table being
+			 * processed. heap_decode() cannot check the file locator easily,
+			 * but we assume that TRUNCATE uses AccessExclusiveLock on the
+			 * table so it should not occur during REPACK (CONCURRENTLY).
+			 */
 			Assert(false);
 			break;
 	}

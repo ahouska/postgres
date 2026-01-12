@@ -421,7 +421,8 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP2_MULTI_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeMultiInsert(ctx, buf);
 			break;
 		case XLOG_HEAP2_NEW_CID:
@@ -520,20 +521,9 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			break;
 
 		case XLOG_HEAP_TRUNCATE:
-			/* Is REPACK (CONCURRENTLY) being run by this backend? */
-			if (am_decoding_for_repack())
-			{
-				/*
-				 * TRUNCATE changes rd_locator of the relation, so it'd break
-				 * REPACK (CONCURRENTLY). In fact it should not happen because
-				 * TRUNCATE needs AccessExclusiveLock on the table. Should we
-				 * only use Assert() here?
-				 */
-				ereport(ERROR,
-						(errmsg("TRUNCATE encountered while doing REPACK (CONCURRENTLY)")));
-			}
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeTruncate(ctx, buf);
 			break;
 
@@ -549,7 +539,8 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 		case XLOG_HEAP_CONFIRM:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeSpecConfirm(ctx, buf);
 			break;
 
