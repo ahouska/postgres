@@ -191,7 +191,7 @@ typedef struct DecodingWorkerShared
 	shm_mq	   *error_mq;
 
 	/*
-	 * Memory the queue is located int.
+	 * Memory the queue is located in.
 	 *
 	 * For considerations on the value see the comments of
 	 * PARALLEL_ERROR_QUEUE_SIZE.
@@ -377,8 +377,8 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 		if (rel == NULL)
 		{
 			/*
-			 * The original transaction was committed, so the current
-			 * portal will not pop the active snapshot.
+			 * The original transaction was committed, so the current portal
+			 * will not pop the active snapshot.
 			 */
 			PopActiveSnapshot();
 
@@ -1081,7 +1081,7 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 * waiting for a lock conflicting with ShareUpdateExclusiveLock on our
 		 * table (e.g.  it runs CREATE INDEX), we can end up in a deadlock.
 		 * Not sure this risk is worth unlocking/locking the table (and its
-		 * clustering index) and checking again if its still eligible for
+		 * clustering index) and checking again if it's still eligible for
 		 * REPACK CONCURRENTLY.
 		 */
 		start_decoding_worker(tableOid);
@@ -2528,7 +2528,7 @@ RepackCommandAsString(RepackCommand cmd)
 		case REPACK_COMMAND_CLUSTER:
 			return "CLUSTER";
 	}
-	return "???";	/* keep compiler quiet */
+	return "???";				/* keep compiler quiet */
 }
 
 
@@ -2801,8 +2801,8 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 
 		if (record == NULL)
 		{
-			int64 timeout = 0;
-			WaitLSNResult	res;
+			int64		timeout = 0;
+			WaitLSNResult res;
 
 			/*
 			 * Before we retry reading, wait until new WAL is flushed.
@@ -2867,8 +2867,7 @@ decode_concurrent_changes(LogicalDecodingContext *ctx,
 	}
 
 	/*
-	 * Now increase the counter(s) to announce that the output is
-	 * available.
+	 * Now increase the counter(s) to announce that the output is available.
 	 */
 	SpinLockAcquire(&shared->mutex);
 	shared->last_exported_changes++;
@@ -3303,7 +3302,7 @@ repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int		last_exported;
+		int			last_exported;
 
 		SpinLockAcquire(&shared->mutex);
 		last_exported = shared->last_exported_changes;
@@ -3898,7 +3897,7 @@ start_decoding_worker(Oid relid)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int			initialized;
+		bool		initialized;
 
 		SpinLockAcquire(&shared->mutex);
 		initialized = shared->initialized;
@@ -4156,7 +4155,7 @@ repack_get_snapshot(ConcurrentChangeContext *ctx)
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)
 	{
-		int		last_exported;
+		int			last_exported;
 
 		SpinLockAcquire(&shared->mutex);
 		last_exported = shared->last_exported_snapshot;

@@ -637,7 +637,6 @@ DecodedXLogRecord
 DecodingOutputState
 DecodingWorker
 DecodingWorkerShared
-DecodingWorkerState
 DefElem
 DefElemAction
 DefaultACLInfo
