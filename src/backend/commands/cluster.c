@@ -121,7 +121,7 @@ static XLogSegNo repack_current_segment = 0;
 int			repack_blocks_per_snapshot = 1024;
 
 /*
- * Remember here to which pages should applied to changes recorded in given
+ * Remember here to which pages we should apply the changes recorded in given
  * file.
  */
 typedef struct RepackApplyRange
@@ -588,6 +588,20 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		PreventInTransactionBlock(isTopLevel, "REPACK (CONCURRENTLY)");
 
 		check_repack_concurrently_requirements(OldHeap);
+
+		/*
+		 * Make sure our XID does not restrict progress of the xmin horizon
+		 * for VACUUM. The reasons VACUUM FULL (which we effectively do)
+		 * cannot do that do not apply here: anything we read cannot be pruned
+		 * as well because we (or rather our decoding worker) have an active
+		 * replication slot. XXX Would PROC_IN_LOGICAL_DECODING be more
+		 * suitable, even though the actual decoding is performed by the
+		 * decoding worker?
+		 */
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		MyProc->statusFlags |= PROC_IN_VACUUM;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
 	}
 
 	/* Check for user-requested abort. */
@@ -1086,6 +1100,9 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 		 */
 		start_decoding_worker(tableOid);
 		ctx->worker = decoding_worker;
+
+		ctx->first_block = InvalidBlockNumber;
+		ctx->block_ranges = NIL;
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -1109,11 +1126,6 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose, bool concurrent
 	NewHeap = table_open(OIDNewHeap, NoLock);
 
 	/* Copy the heap data into the new table in the desired order */
-	if (concurrent)
-	{
-		ctx->first_block = InvalidBlockNumber;
-		ctx->block_ranges = NIL;
-	}
 	copy_table_data(NewHeap, OldHeap, index, verbose, &swap_toast_by_content,
 					&frozenXid, &cutoffMulti, ctx);
 
@@ -2915,6 +2927,7 @@ apply_concurrent_changes(ConcurrentChangeContext *ctx)
 	}
 
 	/* Get ready for the next decoding. */
+	list_free(ctx->block_changes);
 	ctx->block_ranges = NIL;
 	ctx->first_block = InvalidBlockNumber;
 }
@@ -3273,7 +3286,7 @@ find_target_tuple(Relation rel, ConcurrentChangeContext *ctx,
  * If 'request_snapshot' is true, the snapshot built at LSN following the last
  * data change needs to be exported too.
  */
-extern void
+void
 repack_get_concurrent_changes(ConcurrentChangeContext *ctx,
 							  XLogRecPtr end_of_wal,
 							  BlockNumber range_end,
@@ -3349,7 +3362,6 @@ repack_add_block_range(ConcurrentChangeContext *ctx, BlockNumber end,
 	range->fname = pstrdup(fname);
 	ctx->block_ranges = lappend(ctx->block_ranges, range);
 }
-
 
 /*
  * Initialize IndexInsertState for index specified by ident_index_id.
@@ -3783,7 +3795,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		Relation	ind;
 
 		/*
-		 * Try to reduce the impact on VACUUM.
+		 * Try to reduce the impact on VACUUM by using one snapshot per index.
 		 *
 		 * The individual builds might still be a problem, but that's a
 		 * separate issue.
@@ -3793,7 +3805,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
 		 * by preventing snapshots from setting MyProc->xmin temporarily. (All
 		 * the snapshots that might have participated in the build, including
 		 * the catalog snapshots, must not be used for other tables of
-		 * course.)
+		 * course, e.g. by index functions.)
 		 */
 		PopActiveSnapshot();
 		InvalidateCatalogSnapshot();
@@ -4052,7 +4064,6 @@ repack_worker_internal(dsm_segment *seg)
 	 * anything in the shared memory until we have serialized the snapshot.
 	 */
 	SpinLockAcquire(&shared->mutex);
-	Assert(XLogRecPtrIsInvalid(shared->lsn_upto));
 	/* Initially we're expected to provide a snapshot and only that. */
 	Assert(shared->snapshot_requested &&
 		   XLogRecPtrIsInvalid(shared->lsn_upto));
@@ -4133,7 +4144,7 @@ export_snapshot(Snapshot snapshot, DecodingWorkerShared *shared)
 /*
  * Get snapshot from the decoding worker.
  */
-extern Snapshot
+Snapshot
 repack_get_snapshot(ConcurrentChangeContext *ctx)
 {
 	DecodingWorkerShared *shared;

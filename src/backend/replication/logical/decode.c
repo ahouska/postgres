@@ -938,7 +938,8 @@ DecodeInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		change->action = REORDER_BUFFER_CHANGE_INTERNAL_SPEC_INSERT;
 	change->origin_id = XLogRecGetOrigin(r);
 
-	memcpy(&change->data.tp.rlocator, &target_locator, sizeof(RelFileLocator));
+	memcpy(&change->data.tp.rlocator, &target_locator,
+		   sizeof(RelFileLocator));
 
 	tupledata = XLogRecGetBlockData(r, 0, &datalen);
 	tuplelen = datalen - SizeOfHeapHeader;
@@ -1179,6 +1180,7 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	char	   *tupledata;
 	Size		tuplelen;
 	RelFileLocator rlocator;
+	BlockNumber blknum;
 
 	xlrec = (xl_heap_multi_insert *) XLogRecGetData(r);
 
@@ -1190,7 +1192,7 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		return;
 
 	/* only interested in our database */
-	XLogRecGetBlockTag(r, 0, &rlocator, NULL, NULL);
+	XLogRecGetBlockTag(r, 0, &rlocator, NULL, &blknum);
 	if (rlocator.dbOid != ctx->slot->data.database)
 		return;
 
@@ -1257,6 +1259,20 @@ DecodeMultiInsert(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			change->data.tp.clear_toast_afterwards = true;
 		else
 			change->data.tp.clear_toast_afterwards = false;
+
+		/*
+		 * REPACK (CONCURRENTLY) needs block number to check if the
+		 * corresponding part of the table was already copied.
+		 */
+		if (am_decoding_for_repack())
+		{
+			/*
+			 * offnum is not really needed, but let's set valid pointer. (It
+			 * will be invalid anyway if the page was initially empty.)
+			 */
+			ItemPointerSet(&change->data.tp.newtuple->t_self, blknum,
+						   xlrec->offsets[i]);
+		}
 
 		ReorderBufferQueueChange(ctx->reorder, XLogRecGetXid(r),
 								 buf->origptr, change, false);

@@ -771,6 +771,13 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									snapshot ? snapshot : SnapshotAny,
 									NULL, 0, 0);
 		index_rescan(indexScan, NULL, 0, NULL, 0);
+
+		/*
+		 * Index scan should not be used in the CONCURRENTLY case because
+		 * it returns tuples in random order, so we could not split the
+		 * scan into a series of page ranges.
+		 */
+		Assert(!concurrent);
 	}
 	else
 	{
@@ -792,6 +799,13 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		/* Set total heap blocks */
 		pgstat_progress_update_param(PROGRESS_REPACK_TOTAL_HEAP_BLKS,
 									 heapScan->rs_nblocks);
+
+		/* Setup the first range. */
+		if (concurrent)
+		{
+			ctx->first_block = heapScan->rs_startblock;
+			range_end = ctx->first_block + repack_blocks_per_snapshot;
+		}
 	}
 
 	slot = table_slot_create(OldHeap, NULL);
@@ -806,6 +820,12 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		 */
 		PopActiveSnapshot();
 		InvalidateCatalogSnapshot();
+
+		/*
+		 * Our xmin should be invalid now. (xid is valid but it should not
+		 * affect vacuum due to the PROC_IN_VACUUM flag.)
+		 */
+		Assert(!TransactionIdIsValid(MyProc->xmin));
 
 		/*
 		 * Wait until the worker has the initial snapshot and retrieve it.
@@ -831,11 +851,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		if (indexScan != NULL)
 		{
-			/*
-			 * Index scan should not be used in the CONCURRENTLY case because
-			 * it returns tuples in random order, so we could not split the
-			 * scan into a series of page ranges.
-			 */
+			/* See above. */
 			Assert(!concurrent);
 
 			if (!index_getnext_slot(indexScan, ForwardScanDirection, slot))
@@ -865,7 +881,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					PopActiveSnapshot();
 
 					/*
-					 * For the last range, there are no restriction on block
+					 * For the last range, there are no restrictions on block
 					 * numbers, so the concurrent data changes pertaining to
 					 * this range can decoded (and applied) anytime after this
 					 * loop.
@@ -976,58 +992,49 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 			/*
 			 * With CONCURRENTLY, we use each snapshot only for certain range
-			 * of pages, so that VACUUM does not get block for too long. So
+			 * of pages, so that VACUUM does not get blocked for too long. So
 			 * first check if the tuple falls into the current range.
 			 */
 			blkno = BufferGetBlockNumber(buf);
 
-			/* The first block of the scan? */
-			if (!BlockNumberIsValid(ctx->first_block))
+			Assert(BlockNumberIsValid(range_end));
+
+			/* End of the current range? */
+			if (blkno >= range_end)
 			{
-				Assert(!BlockNumberIsValid(range_end));
+				XLogRecPtr	end_of_wal;
 
-				ctx->first_block = blkno;
-				range_end = repack_blocks_per_snapshot;
-			}
-			else
-			{
-				Assert(BlockNumberIsValid(range_end));
+				PopActiveSnapshot();
 
-				/* End of the current range? */
-				if (blkno >= range_end)
-				{
-					XLogRecPtr	end_of_wal;
+				/* See above. */
+				Assert(!TransactionIdIsValid(MyProc->xmin));
+				/*
+				 * XXX It might be worth Assert(CatalogSnapshot == NULL) here,
+				 * however that symbol is not external.
+				 */
 
-					PopActiveSnapshot();
+				/*
+				 * Decode all the concurrent data changes committed so far -
+				 * these will be applicable to the current range.
+				 */
+				end_of_wal = GetFlushRecPtr(NULL);
+				repack_get_concurrent_changes(ctx, end_of_wal, range_end,
+											  true, false);
 
-					/*
-					 * XXX It might be worth Assert(CatalogSnapshot == NULL)
-					 * here, however that symbol is not external.
-					 */
+				/*
+				 * Define the next range.
+				 */
+				range_end = blkno + repack_blocks_per_snapshot;
 
-					/*
-					 * Decode all the concurrent data changes committed so far
-					 * - these will be applicable to the current range.
-					 */
-					end_of_wal = GetFlushRecPtr(NULL);
-					repack_get_concurrent_changes(ctx, end_of_wal, range_end,
-												  true, false);
-
-					/*
-					 * Define the next range.
-					 */
-					range_end = blkno + repack_blocks_per_snapshot;
-
-					/*
-					 * Get the snapshot for the next range - it should have
-					 * been built at the position right after the last change
-					 * decoded. Data present in the next range of blocks will
-					 * either be visible to the snapshot or appear in the next
-					 * batch of decoded changes.
-					 */
-					snapshot = repack_get_snapshot(ctx);
-					PushActiveSnapshot(snapshot);
-				}
+				/*
+				 * Get the snapshot for the next range - it should have been
+				 * built at the position right after the last change
+				 * decoded. Data present in the next range of blocks will
+				 * either be visible to the snapshot or appear in the next
+				 * batch of decoded changes.
+				 */
+				snapshot = repack_get_snapshot(ctx);
+				PushActiveSnapshot(snapshot);
 			}
 
 			/* Finally check the tuple visibility. */
