@@ -255,6 +255,7 @@ Barrier
 BaseBackupCmd
 BaseBackupTargetHandle
 BaseBackupTargetType
+BatchMVCCState
 BeginDirectModify_function
 BeginForeignInsert_function
 BeginForeignModify_function
@@ -421,6 +422,7 @@ CatalogIdMapEntry
 CatalogIndexState
 ChangeVarNodes_callback
 ChangeVarNodes_context
+ChannelName
 CheckPoint
 CheckPointStmt
 CheckpointStatsData
@@ -1114,6 +1116,8 @@ GistSplitUnion
 GistSplitVector
 GistTsVectorOptions
 GistVacState
+GlobalChannelEntry
+GlobalChannelKey
 GlobalTransaction
 GlobalTransactionData
 GlobalVisHorizonKind
@@ -1584,6 +1588,7 @@ ListParsedLex
 ListenAction
 ListenActionKind
 ListenStmt
+ListenerEntry
 LoInfo
 LoadStmt
 LocalBufferLookupEnt
@@ -2180,6 +2185,8 @@ PatternInfoArray
 Pattern_Prefix_Status
 Pattern_Type
 PendingFsyncEntry
+PendingListenAction
+PendingListenEntry
 PendingRelDelete
 PendingRelSync
 PendingUnlinkEntry
@@ -3954,6 +3961,7 @@ pg_sha512_ctx
 pg_snapshot
 pg_special_case
 pg_stack_base_t
+pg_ternary
 pg_time_t
 pg_time_usec_t
 pg_tz
@@ -4081,6 +4089,7 @@ relopt_kind
 relopt_parse_elt
 relopt_real
 relopt_string
+relopt_ternary
 relopt_type
 relopt_value
 relopts_validator

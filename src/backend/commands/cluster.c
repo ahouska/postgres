@@ -2927,7 +2927,7 @@ apply_concurrent_changes(ConcurrentChangeContext *ctx)
 	}
 
 	/* Get ready for the next decoding. */
-	list_free(ctx->block_changes);
+	list_free(ctx->block_ranges);
 	ctx->block_ranges = NIL;
 	ctx->first_block = InvalidBlockNumber;
 }
