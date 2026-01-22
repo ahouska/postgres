@@ -2620,11 +2620,10 @@ setup_logical_decoding(Oid relid)
 	Assert(!TransactionIdIsValid(GetTopTransactionIdIfAny()));
 
 	/*
-	 * Check if we can use logical decoding.
+	 * Make sure we can use logical decoding.
 	 */
 	CheckSlotPermissions();
 	CheckLogicalDecodingRequirements();
-
 	/*
 	 * A single backend should not execute multiple REPACK commands at a time,
 	 * so use PID to make the slot unique.
@@ -2634,6 +2633,8 @@ setup_logical_decoding(Oid relid)
 	snprintf(NameStr(slotname), NAMEDATALEN, "repack_%d", MyProcPid);
 	ReplicationSlotCreate(NameStr(slotname), true, RS_TEMPORARY, false, false,
 						  false);
+
+	EnsureLogicalDecodingEnabled();
 
 	/*
 	 * Neither prepare_write nor do_write callback nor update_progress is
