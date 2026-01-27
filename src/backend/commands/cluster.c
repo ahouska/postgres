@@ -588,20 +588,6 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		PreventInTransactionBlock(isTopLevel, "REPACK (CONCURRENTLY)");
 
 		check_repack_concurrently_requirements(OldHeap);
-
-		/*
-		 * Make sure our XID does not restrict progress of the xmin horizon
-		 * for VACUUM. The reasons VACUUM FULL (which we effectively do)
-		 * cannot do that do not apply here: anything we read cannot be pruned
-		 * as well because we (or rather our decoding worker) have an active
-		 * replication slot. XXX Would PROC_IN_LOGICAL_DECODING be more
-		 * suitable, even though the actual decoding is performed by the
-		 * decoding worker?
-		 */
-		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-		MyProc->statusFlags |= PROC_IN_VACUUM;
-		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-		LWLockRelease(ProcArrayLock);
 	}
 
 	/* Check for user-requested abort. */

@@ -822,8 +822,25 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		InvalidateCatalogSnapshot();
 
 		/*
-		 * Our xmin should be invalid now. (xid is valid but it should not
-		 * affect vacuum due to the PROC_IN_VACUUM flag.)
+		 * As there is no snapshot, our xmin should be invalid now.
+		 *
+		 * TODO xid can still be valid. We can mark our transaction with the
+		 * PROC_IN_VACUUM flag, but at the same time we need to make sure that
+		 * anything we write is ignored by VACUUM: since our xid is >= xmin of
+		 * our replication slot, the slot does not help. Other transaction
+		 * might use their RecentXmin to check if our xact is still running
+		 * (see TransactionIdIsInProgress) before they check CLOG. By using
+		 * PROC_IN_VACUUM we'd let their RecentXmin skip our xid. Thus our
+		 * xact would appear not running anymore, but not yet marked committed
+		 * in CLOG either, therefore aborted: it's o.k. for VACUUM to clean up
+		 * tuples written by aborted transaction.
+		 *
+		 * Perhaps we can add a new field 'relisvalid' to pg_class (and use
+		 * 'indisvalid' flag of pg_index) so that we can do the catalog
+		 * changes in separate transactions. Only the transaction that copies
+		 * the heap would then use the PROC_IN_VACUUM flag. However, it would
+		 * have to do regular (MVCC-safe) rewriting, i.e. avoid using its own
+		 * xid.
 		 */
 		Assert(!TransactionIdIsValid(MyProc->xmin));
 
@@ -883,8 +900,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					/*
 					 * For the last range, there are no restrictions on block
 					 * numbers, so the concurrent data changes pertaining to
-					 * this range can decoded (and applied) anytime after this
-					 * loop.
+					 * this range can be decoded (and applied) anytime after
+					 * this loop.
 					 */
 				}
 				break;
